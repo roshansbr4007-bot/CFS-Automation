@@ -1,3 +1,4 @@
+```python
 """Base settings shared by every environment. Secrets and connections come from the environment."""
 
 from pathlib import Path
@@ -17,15 +18,18 @@ DEBUG = env.bool("DJANGO_DEBUG", default=False)
 ALLOWED_HOSTS = env.list("DJANGO_ALLOWED_HOSTS", default=[])
 CSRF_TRUSTED_ORIGINS = env.list("CSRF_TRUSTED_ORIGINS", default=[])
 
+# CORS: allow the deployed frontend to call the backend.
+CORS_ALLOWED_ORIGINS = env.list("CORS_ALLOWED_ORIGINS", default=[])
+
 INSTALLED_APPS = [
-    # Phase 8: Daphne first, so `manage.py runserver` serves HTTP and WebSockets (ASGI).
+    # Phase 8: Daphne first, so runserver serves HTTP and WebSockets (ASGI).
     "daphne",
-    # django.contrib.admin is intentionally NOT installed:
-    # its edits would bypass the services and the audit log.
+    "corsheaders",
+    # django.contrib.admin is intentionally NOT installed.
     "django.contrib.auth",
     "django.contrib.contenttypes",
     "django.contrib.sessions",
-    "django.contrib.staticfiles",  # Swagger UI page assets
+    "django.contrib.staticfiles",
     "rest_framework",
     "drf_spectacular",
     "apps.core",
@@ -46,6 +50,7 @@ INSTALLED_APPS = [
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
+    "corsheaders.middleware.CorsMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
@@ -62,7 +67,9 @@ TEMPLATES = [
         "BACKEND": "django.template.backends.django.DjangoTemplates",
         "DIRS": [],
         "APP_DIRS": True,
-        "OPTIONS": {"context_processors": ["django.template.context_processors.request"]},
+        "OPTIONS": {
+            "context_processors": ["django.template.context_processors.request"]
+        },
     }
 ]
 
@@ -91,13 +98,14 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 STATIC_URL = "static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
 
-# Private uploads (task attachments). MEDIA_URL is deliberately NOT routed: files are only
-# served through permission-checked API views.
+# Private uploads (task attachments).
 MEDIA_ROOT = env("MEDIA_ROOT", default=str(BASE_DIR / "media"))
 
-# Email (SLA notifications). Development prints emails to the console; production SMTP values
-# come from .env: EMAIL_BACKEND=django.core.mail.backends.smtp.EmailBackend, EMAIL_HOST, ...
-EMAIL_BACKEND = env("EMAIL_BACKEND", default="django.core.mail.backends.console.EmailBackend")
+# Email (SLA notifications).
+EMAIL_BACKEND = env(
+    "EMAIL_BACKEND",
+    default="django.core.mail.backends.console.EmailBackend",
+)
 EMAIL_HOST = env("EMAIL_HOST", default="localhost")
 EMAIL_PORT = env.int("EMAIL_PORT", default=25)
 EMAIL_HOST_USER = env("EMAIL_HOST_USER", default="")
@@ -105,16 +113,21 @@ EMAIL_HOST_PASSWORD = env("EMAIL_HOST_PASSWORD", default="")
 EMAIL_USE_TLS = env.bool("EMAIL_USE_TLS", default=False)
 DEFAULT_FROM_EMAIL = env("DEFAULT_FROM_EMAIL", default="cfs-operations@localhost")
 
-# Celery (Phase 5). Celery Beat is the ONE scheduler: it runs the recurring generator and the
-# SLA checker every minute. Production must run exactly one Beat process.
-CELERY_BROKER_URL = env("CELERY_BROKER_URL", default="redis://localhost:6379/0")
+# Celery (Phase 5).
+CELERY_BROKER_URL = env(
+    "CELERY_BROKER_URL",
+    default="redis://localhost:6379/0",
+)
 
-# Phase 8 real-time delivery (Django Channels). Reuses the existing Redis server on its own
-# database index (1) so Celery's broker database (0) is untouched. Tests use an in-memory layer.
+# Phase 8 real-time delivery (Django Channels).
 CHANNEL_LAYERS = {
     "default": {
         "BACKEND": "channels_redis.core.RedisChannelLayer",
-        "CONFIG": {"hosts": [env("CHANNEL_REDIS_URL", default="redis://localhost:6379/1")]},
+        "CONFIG": {
+            "hosts": [
+                env("CHANNEL_REDIS_URL", default="redis://localhost:6379/1")
+            ]
+        },
     }
 }
 CELERY_TIMEZONE = "Asia/Kolkata"
@@ -131,7 +144,7 @@ CELERY_BEAT_SCHEDULE = {
         "schedule": 60.0,
         "options": {"expires": 55},
     },
-    # Phase 7.3 (approved E17): KRA performance. Times are IST (CELERY_TIMEZONE).
+    # Phase 7.3 (approved E17): KRA performance.
     "kra-daily-calculation": {
         "task": "performance.daily_kra_calculation",
         "schedule": crontab(minute=0, hour=1),
@@ -142,25 +155,32 @@ CELERY_BEAT_SCHEDULE = {
     },
 }
 
-# Who is the "Boss" recipient of an Overdue escalation. There is no Boss role and Admins are
-# NOT assumed to be the Boss. Default: the assignee's reporting manager (Phase 2 relationship).
-# Replace with another resolver function once a dedicated escalation mapping is approved.
+# Who receives an Overdue escalation.
 SLA_BOSS_RESOLVER = env(
-    "SLA_BOSS_RESOLVER", default="apps.notifications.services.reporting_manager_of_assignee"
+    "SLA_BOSS_RESOLVER",
+    default="apps.notifications.services.reporting_manager_of_assignee",
 )
 
-# Sessions and CSRF. Session length and lockout are Django defaults until Phase 13.
+# Sessions and CSRF.
 SESSION_COOKIE_HTTPONLY = True
 SESSION_COOKIE_SAMESITE = "Lax"
 CSRF_COOKIE_SAMESITE = "Lax"
-CSRF_COOKIE_HTTPONLY = False  # the React app reads it to send X-CSRFToken
+CSRF_COOKIE_HTTPONLY = False
 CSRF_FAILURE_VIEW = "apps.core.views.csrf_failure"
 
 REST_FRAMEWORK = {
-    "DEFAULT_AUTHENTICATION_CLASSES": ["apps.core.authentication.SessionAuthentication"],
-    "DEFAULT_PERMISSION_CLASSES": ["rest_framework.permissions.IsAuthenticated"],
-    "DEFAULT_RENDERER_CLASSES": ["rest_framework.renderers.JSONRenderer"],
-    "DEFAULT_PARSER_CLASSES": ["rest_framework.parsers.JSONParser"],
+    "DEFAULT_AUTHENTICATION_CLASSES": [
+        "apps.core.authentication.SessionAuthentication"
+    ],
+    "DEFAULT_PERMISSION_CLASSES": [
+        "rest_framework.permissions.IsAuthenticated"
+    ],
+    "DEFAULT_RENDERER_CLASSES": [
+        "rest_framework.renderers.JSONRenderer"
+    ],
+    "DEFAULT_PARSER_CLASSES": [
+        "rest_framework.parsers.JSONParser"
+    ],
     "DEFAULT_PAGINATION_CLASS": "apps.core.pagination.StandardPagination",
     "PAGE_SIZE": 25,
     "EXCEPTION_HANDLER": "apps.core.exceptions.exception_handler",
@@ -176,15 +196,12 @@ SPECTACULAR_SETTINGS = {
     "COMPONENT_SPLIT_REQUEST": True,
     "SERVE_INCLUDE_SCHEMA": False,
     "SERVE_PERMISSIONS": ["rest_framework.permissions.AllowAny"],
-    # Two different "kind" choice sets exist (SLA clocks, notifications): name them explicitly.
     "ENUM_NAME_OVERRIDES": {
         "SlaClockKindEnum": "apps.sla.models.ClockKind",
         "NotificationKindEnum": "apps.notifications.models.NotificationKind",
-        # Phase 5: further fields named "status" / "kind" with different choice sets.
         "TaskStatusEnum": "apps.tasks.models.TaskStatus",
         "OccurrenceStatusEnum": "apps.recurring.models.OccurrenceStatus",
         "CalendarDayKindEnum": "apps.calendars.models.DayKind",
-        # Phase 9: one cause vocabulary for the employee reason and the reviewer cause.
         "OverdueCauseEnum": "apps.overdue.models.OverdueCause",
     },
 }
@@ -195,3 +212,4 @@ LOGGING = {
     "handlers": {"console": {"class": "logging.StreamHandler"}},
     "root": {"handlers": ["console"], "level": "INFO"},
 }
+```
