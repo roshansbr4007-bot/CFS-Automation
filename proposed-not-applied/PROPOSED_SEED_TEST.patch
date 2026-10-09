@@ -1,0 +1,33 @@
+--- a/backend/apps/accounts/tests/test_seed_and_command.py
++++ b/backend/apps/accounts/tests/test_seed_and_command.py
+@@ -63,20 +63,27 @@
+     assert "recurring.view_all_responsibilities" not in migration.ROLE_PERMISSIONS["HR"]
+ 
+ 
++def test_phase5_seed_migration_is_unchanged():
++    """Migration 0007 keeps its Phase 5 grants; 0008 adds the Phase 9 overdue authority."""
++    migration = importlib.import_module("apps.accounts.migrations.0007_phase5_role_permissions")
++    assert "overdue.review_all_cases" not in migration.ROLE_PERMISSIONS["Admin"]
++    assert "overdue.review_team_cases" not in migration.ROLE_PERMISSIONS["Operations Manager"]
++
++
+ def test_r3_seed_matches_roles_module_and_is_idempotent():
+     expected = {name: sorted(perms) for name, perms in roles.ROLE_PERMISSIONS.items()}
+     assert _group_perms() == expected
+ 
+     # The LATEST role-seed migration holds the frozen copy of the current grants.
+     migration = importlib.import_module(
+-        "apps.accounts.migrations.0007_phase5_role_permissions"
++        "apps.accounts.migrations.0008_phase9_overdue_permissions"
+     )
+     assert {k: sorted(v) for k, v in migration.ROLE_PERMISSIONS.items()} == expected
+     # Run the seed again against the migration-state app registry (never the live registry).
+     state = MigrationLoader(connection).project_state(
+-        ("accounts", "0007_phase5_role_permissions")
++        ("accounts", "0008_phase9_overdue_permissions")
+     )
+-    migration.grant_phase5_permissions(state.apps, None)
++    migration.grant_phase9_permissions(state.apps, None)
+     assert _group_perms() == expected
+     assert Group.objects.count() == 4
+ 

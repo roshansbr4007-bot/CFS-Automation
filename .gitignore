@@ -1,0 +1,15 @@
+.env
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.coverage
+htmlcov/
+backend/schema.yml
+node_modules/
+frontend/dist/
+frontend/test-results/
+frontend/playwright-report/
+.DS_Store
+staticfiles/
+backend/media/

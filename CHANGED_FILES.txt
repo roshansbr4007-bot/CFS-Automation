@@ -1,0 +1,566 @@
+CFS Operations Platform - Change Set 1 (deactivation, no task type on new tasks, priority SLA)
+Paths relative to the repository root. No migrations. Phase 7/8/9, generator, Command Center untouched.
+
+  backend/apps/recurring/services.py
+  backend/apps/recurring/tests/test_deactivation.py
+  backend/apps/sla/management/commands/configure_priority_sla.py
+  backend/apps/sla/services.py
+  backend/apps/sla/tests/test_priority_sla_command.py
+  frontend/src/features/recurring/ResponsibilitiesPage.tsx
+  frontend/src/features/recurring/ResponsibilityDeactivation.test.tsx
+  frontend/src/features/tasks/TaskDetailPage.tsx
+  frontend/src/features/tasks/TaskFormDialog.tsx
+  frontend/src/features/tasks/TasksPage.test.tsx
+  frontend/src/features/tasks/TasksPage.tsx
+  frontend/src/features/tasks/labels.ts
+
+MANUAL STEP AFTER DEPLOY (not run automatically):
+  cd backend
+  python manage.py configure_priority_sla --dry-run
+  python manage.py configure_priority_sla
+
+DIFFS OF MODIFIED FILES
+--- a/backend/apps/recurring/services.py
++++ b/backend/apps/recurring/services.py
+@@ -36,6 +36,19 @@
+     message = "This record was changed by someone else. Reload and try again."
+ 
+ 
++class ResponsibilityInactive(ConflictError):
++    """Change Set 1 (D6): a deactivated (archived) responsibility is kept with all its history
++    but no longer changes: no edits, owners or schedules."""
++
++    code = "responsibility_inactive"
++    message = "This responsibility is deactivated (archived) and can no longer be changed."
++
++
++def _require_active(responsibility_id: int) -> None:
++    if not Responsibility.objects.filter(pk=responsibility_id, is_active=True).exists():
++        raise ResponsibilityInactive()
++
++
+ def today_ist() -> date:
+     return to_ist(timezone.now()).date()
+ 
+@@ -152,6 +165,8 @@
+                 old[field], new[field] = getattr(r, field), value
+                 setattr(r, field, value)
+         status_changed = "is_active" in changes and changes["is_active"] != r.is_active
++        if new and not r.is_active:
++            raise ResponsibilityInactive()
+         if not new and not status_changed:
+             return r
+         if status_changed:
+@@ -218,6 +233,7 @@
+     with transaction.atomic():
+         r = Responsibility.objects.select_for_update().get(pk=responsibility.pk)
+         _require_manage(actor, r)
++        _require_active(r.pk)
+         open_row = r.owners.filter(effective_to__isnull=True, superseded_at__isnull=True).first()
+         previous = None
+         corrected = False
+@@ -281,6 +297,7 @@
+     with transaction.atomic():
+         r = Responsibility.objects.select_for_update().get(pk=responsibility.pk)
+         _require_manage(actor, r)
++        _require_active(r.pk)
+         open_row = r.owners.filter(effective_to__isnull=True, superseded_at__isnull=True).first()
+         if open_row is None:
+             raise ConflictError("This responsibility has no current owner.", code="no_owner")
+@@ -364,6 +381,7 @@
+ 
+ def create_schedule(*, actor, responsibility, **values) -> RecurringSchedule:
+     _require_schedule_manage(actor, responsibility)
++    _require_active(responsibility.pk)
+     values.setdefault("non_working_day_policy", NonWorkingDayPolicy.SKIP)
+     values["title"] = _text(values.get("title"), "title")
+     _check_schedule(values)
+@@ -379,6 +397,7 @@
+ def update_schedule(*, actor, schedule, version, **changes) -> RecurringSchedule:
+     """Changes apply to future occurrences only; generated tasks are never touched."""
+     _require_schedule_manage(actor, schedule.responsibility)
++    _require_active(schedule.responsibility_id)
+     allowed = {*SCHEDULE_FIELDS, "is_active"}
+     if set(changes) - allowed:
+         raise TypeError(f"Unknown fields: {sorted(set(changes) - allowed)}")
+--- a/backend/apps/sla/services.py
++++ b/backend/apps/sla/services.py
+@@ -82,14 +82,17 @@
+     return active_rule(mapping.rule_code) if mapping else None
+ 
+ 
+-def priority_plan(*, source, priority):
+-    """(rule, snapshot, note) when a MANUAL task's priority has an active SLA mapping, else None.
++def priority_plan(*, source, priority, template=None):
++    """(rule, snapshot, note) when a task's priority has an active SLA mapping, else None.
+ 
+-    Phase 5.2: such a task's resolution clock uses that rule and starts at assignment, so it never
+-    depends on a daily responsibility's fixed schedule. Without a mapping (or for a SCHEDULED daily
+-    activity) the existing task-type behaviour applies unchanged.
++    Phase 5.2: a MANUAL task's resolution clock uses that rule and starts at assignment.
++    Change Set 1 (D4): so does a SCHEDULED task WITHOUT a task type (it had no SLA before). A
++    scheduled task with a task type keeps that task type's SLA unchanged. Without a mapping the
++    existing behaviour applies unchanged.
+     """
+-    if source != "MANUAL":
++    if source == "SCHEDULED" and template is not None:
++        return None
++    if source not in ("MANUAL", "SCHEDULED"):
+         return None
+     rule = priority_rule(priority)
+     if rule is None:
+@@ -178,7 +181,7 @@
+ def on_task_created(task, assignment, now: datetime) -> None:
+     if task.acknowledgment_required:
+         start_ack_clock(task, assignment, task.assigned_at)
+-    by_priority = priority_plan(source=task.source, priority=task.priority)
++    by_priority = priority_plan(source=task.source, priority=task.priority, template=task.template)
+     if by_priority is not None:
+         rule, snap, _ = by_priority
+         if snap is not None:
+--- a/frontend/src/features/recurring/ResponsibilitiesPage.tsx
++++ b/frontend/src/features/recurring/ResponsibilitiesPage.tsx
+@@ -1,5 +1,5 @@
+ import {
+-  Alert, Button, Chip, Dialog, DialogActions, DialogContent, DialogTitle, FormControlLabel, MenuItem, Stack, Switch,
++  Alert, Button, Chip, Dialog, DialogActions, DialogContent, DialogContentText, DialogTitle, MenuItem, Stack,
+   Table, TableBody, TableCell, TableHead, TableRow, TextField, Typography,
+ } from "@mui/material";
+ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+@@ -12,7 +12,7 @@
+ import { ApiErrorAlert } from "../../components/ApiErrorAlert";
+ import { DataTable, type Column } from "../../components/DataTable";
+ import { formatBusinessDate } from "../../components/DateTimeText";
+-import { PRIORITY_LABEL } from "../tasks/labels";
++import { TASK_PRIORITY_LABEL } from "../tasks/labels";
+ import {
+   AddScheduleDialog, emptySchedule, ScheduleFields, serverErrors, todayIST, toScheduleInput, validateSchedule,
+   type ScheduleErrors, type ScheduleFormValue,
+@@ -28,6 +28,7 @@
+   const [owning, setOwning] = useState<Responsibility | null>(null);
+   const [history, setHistory] = useState<Responsibility | null>(null);
+   const [scheduling, setScheduling] = useState<Responsibility | null>(null);
++  const [archiving, setArchiving] = useState<Responsibility | null>(null);
+ 
+   const columns: Column<Responsibility>[] = [
+     { key: "name", header: "Responsibility", render: (r) => <Stack><strong>{r.name}</strong><Typography variant="caption" color="text.secondary">{r.code}</Typography></Stack> },
+@@ -38,12 +39,14 @@
+     { key: "schedule", header: "Schedule", render: (r) => r.active_schedule_count > 0
+       ? `${r.active_schedule_count} active`
+       : <Chip size="small" color="warning" label="No schedule" /> },
+-    { key: "active", header: "Status", render: (r) => <Chip size="small" label={r.is_active ? "Active" : "Inactive"} color={r.is_active ? "success" : "default"} /> },
++    { key: "active", header: "Status", render: (r) => <Chip size="small" label={r.is_active ? "Active" : "Archived"} color={r.is_active ? "success" : "default"} /> },
+     { key: "actions", header: "", render: (r) => (
+       <Stack direction="row" spacing={1}>
+-        {r.can_manage && <Button size="small" onClick={() => setEditing(r)}>Edit</Button>}
+-        {r.can_manage && <Button size="small" onClick={() => setOwning(r)}>Change owner</Button>}
+-        {r.can_manage && <Button size="small" onClick={() => setScheduling(r)}>Add schedule</Button>}
++        {/* Change Set 1 (D6): an archived responsibility no longer changes (no reactivation here). */}
++        {r.is_active && r.can_manage && <Button size="small" onClick={() => setEditing(r)}>Edit</Button>}
++        {r.is_active && r.can_manage && <Button size="small" onClick={() => setOwning(r)}>Change owner</Button>}
++        {r.is_active && r.can_manage && <Button size="small" onClick={() => setScheduling(r)}>Add schedule</Button>}
++        {r.is_active && r.can_manage && <Button size="small" color="warning" onClick={() => setArchiving(r)}>Deactivate</Button>}
+         <Button size="small" onClick={() => setHistory(r)}>History</Button>
+       </Stack>
+     ) },
+@@ -63,6 +66,7 @@
+         total={data.length} page={0} onPageChange={() => undefined} emptyMessage="No responsibilities yet." />
+       <ResponsibilityDialog value={editing} onClose={() => setEditing(null)} />
+       <OwnerDialog responsibility={owning} onClose={() => setOwning(null)} />
++      <DeactivateDialog responsibility={archiving} onClose={() => setArchiving(null)} />
+       <HistoryDialog responsibility={history} onClose={() => setHistory(null)} />
+       <AddScheduleDialog responsibility={scheduling} onClose={() => setScheduling(null)} />
+     </Stack>
+@@ -86,7 +90,7 @@
+   });
+   const [code, setCode] = useState(""); const [name, setName] = useState(""); const [description, setDescription] = useState("");
+   const [department, setDepartment] = useState(""); const [category, setCategory] = useState("");
+-  const [priority, setPriority] = useState<TaskPriority>("MEDIUM"); const [active, setActive] = useState(true);
++  const [priority, setPriority] = useState<TaskPriority>("MEDIUM");
+   const [template, setTemplate] = useState("");
+   const [owner, setOwner] = useState(""); const [ownerFrom, setOwnerFrom] = useState(todayIST());
+   const [schedule, setSchedule] = useState<ScheduleFormValue>(emptySchedule());
+@@ -95,14 +99,14 @@
+     if (!open) return;
+     setCode(existing?.code ?? ""); setName(existing?.name ?? ""); setDescription(existing?.description ?? "");
+     setDepartment(existing ? String(existing.department.id) : ""); setCategory(existing ? String(existing.category.id) : "");
+-    setPriority(existing?.priority ?? "MEDIUM"); setActive(existing?.is_active ?? true);
++    setPriority(existing?.priority ?? "MEDIUM");
+     setTemplate(existing?.template ? String(existing.template.id) : "");
+     setOwner(""); setOwnerFrom(todayIST()); setSchedule(emptySchedule()); setChecked(false);
+   }, [open, existing]);
+   const mutation = useMutation({
+     mutationFn: () => existing
+       ? responsibilitiesApi.update(existing.id, {
+-        version: existing.version, name, description, category: Number(category), priority, is_active: active,
++        version: existing.version, name, description, category: Number(category), priority,
+         template: template ? Number(template) : null,
+       })
+       : responsibilitiesApi.setup({
+@@ -152,14 +156,13 @@
+           {categories.map((c) => <MenuItem key={c.id} value={String(c.id)}>{c.name}</MenuItem>)}
+         </TextField>
+         <TextField size="small" select label="Priority" value={priority} onChange={(e) => setPriority(e.target.value as TaskPriority)}>
+-          {TASK_PRIORITIES.map((p) => <MenuItem key={p} value={p}>{PRIORITY_LABEL[p]}</MenuItem>)}
++          {TASK_PRIORITIES.map((p) => <MenuItem key={p} value={p}>{TASK_PRIORITY_LABEL[p]}</MenuItem>)}
+         </TextField>
+         <TextField size="small" select label="Task type" value={template} onChange={(e) => setTemplate(String(e.target.value))}
+           error={!!fieldError.template} helperText={fieldError.template ?? "Sets the SLA (for example, within hours of login)."}>
+           <MenuItem value="">None (priority SLA)</MenuItem>
+           {departmentTemplates.map((t) => <MenuItem key={t.id} value={String(t.id)}>{t.name}</MenuItem>)}
+         </TextField>
+-        {existing && <FormControlLabel control={<Switch checked={active} onChange={(e) => setActive(e.target.checked)} />} label="Active" />}
+         {!existing && (
+           <>
+             <Typography variant="subtitle2" component="h3">Owner (optional)</Typography>
+@@ -184,6 +187,46 @@
+       </DialogActions>
+     </Dialog>
+   );
++}
++
++/** Change Set 1 (D6): deactivate (archive) through the existing update with its audit. Nothing is
++ * deleted; it simply stops generating work. There is no reactivation in the UI. */
++function DeactivateDialog({ responsibility, onClose }: { responsibility: Responsibility | null; onClose: () => void }) {
++  const qc = useQueryClient();
++  const mutation = useMutation({
++    mutationFn: () => {
++      const r = responsibility as Responsibility;
++      return responsibilitiesApi.update(r.id, { version: r.version, is_active: false });
++    },
++    onSuccess: async () => {
++      await Promise.all([
++        qc.invalidateQueries({ queryKey: ["responsibilities"] }),
++        qc.invalidateQueries({ queryKey: ["recurring-schedules"] }),
++      ]);
++      onClose();
++    },
++  });
++  useEffect(() => { if (responsibility) mutation.reset(); }, [responsibility]); // eslint-disable-line react-hooks/exhaustive-deps
++  return (
++    <Dialog open={responsibility !== null} onClose={onClose} fullWidth maxWidth="xs" aria-labelledby="deactivate-title">
++      <DialogTitle id="deactivate-title">Deactivate {responsibility?.name}?</DialogTitle>
++      <DialogContent>
++        <Stack spacing={1.5}>
++          <ApiErrorAlert error={mutation.error} />
++          <DialogContentText>
++            No new tasks will be generated. Its owners, schedules, generated tasks and history are kept.
++          </DialogContentText>
++          <DialogContentText>
++            An archived responsibility can no longer be edited, given a new owner or a new schedule.
++          </DialogContentText>
++        </Stack>
++      </DialogContent>
++      <DialogActions>
++        <Button onClick={onClose}>Cancel</Button>
++        <Button variant="contained" color="warning" disabled={mutation.isPending} onClick={() => mutation.mutate()}>Deactivate</Button>
++      </DialogActions>
++    </Dialog>
++  );
+ }
+ 
+ function OwnerDialog({ responsibility, onClose }: { responsibility: Responsibility | null; onClose: () => void }) {
+--- a/frontend/src/features/tasks/TaskDetailPage.tsx
++++ b/frontend/src/features/tasks/TaskDetailPage.tsx
+@@ -12,7 +12,7 @@
+ import { tasksApi } from "../../api/endpoints";
+ import type { TaskAction, TaskDetail } from "../../api/types";
+ import { DateTimeText, formatBusinessDate, formatIST } from "../../components/DateTimeText";
+-import { acknowledgmentLabel, PRIORITY_LABEL, STATUS_LABEL, VERIFICATION_LABEL } from "./labels";
++import { acknowledgmentLabel, TASK_PRIORITY_LABEL, STATUS_LABEL, VERIFICATION_LABEL } from "./labels";
+ import { SlaBadge } from "./SlaBadge";
+ import { SlaPanel } from "./SlaPanel";
+ import { SourceBadge } from "./SourceBadge";
+@@ -195,7 +195,7 @@
+                   <Row label="Generated at"><DateTimeText value={task.generated_at} /></Row>
+                 </>
+               )}
+-              <Row label="Priority">{PRIORITY_LABEL[task.priority]}</Row>
++              <Row label="Priority">{TASK_PRIORITY_LABEL[task.priority]}</Row>
+               <Row label="Task type">{task.template?.name ?? "Ad-hoc"}</Row>
+               <Row label="Acknowledgement">{acknowledgmentLabel(task)}</Row>
+               <Row label="Verification">{VERIFICATION_LABEL[task.verification_status]}</Row>
+--- a/frontend/src/features/tasks/TaskFormDialog.tsx
++++ b/frontend/src/features/tasks/TaskFormDialog.tsx
+@@ -14,11 +14,12 @@
+   RECEIVED_SOURCES, TASK_PRIORITIES, type ReceivedSource, type TaskDetail, type TaskPriority,
+ } from "../../api/types";
+ import { DateTimeText } from "../../components/DateTimeText";
+-import { PRIORITY_LABEL } from "./labels";
++import { TASK_PRIORITY_LABEL } from "./labels";
+ 
+ interface Props { open: boolean; onClose: () => void; onCreated: (task: TaskDetail) => void; }
+ 
+-/** The form collects IST wall-clock input; the server stores UTC and calculates every SLA value. */
++/** The form collects IST wall-clock input; the server stores UTC and calculates every SLA value.
++ * Change Set 1 (D5): no task type — the SLA comes from the priority (template is always null). */
+ function istToIso(local: string): string | null {
+   return local ? `${local}:00+05:30` : null;
+ }
+@@ -36,19 +37,16 @@
+ 
+ export function TaskFormDialog({ open, onClose, onCreated }: Props) {
+   const qc = useQueryClient();
+-  const { data: templates = [] } = useQuery({ queryKey: ["task-templates"], queryFn: tasksApi.templates, enabled: open });
+   const { data: assignees = [] } = useQuery({ queryKey: ["task-assignees"], queryFn: tasksApi.assignees, enabled: open });
+   const { data: departments = [] } = useQuery({ queryKey: ["departments"], queryFn: departmentsApi.list, enabled: open });
+   const { data: categories = [] } = useQuery({ queryKey: ["task-categories"], queryFn: tasksApi.categories, enabled: open });
+ 
+   const [title, setTitle] = useState("");
+   const [description, setDescription] = useState("");
+-  const [templateId, setTemplateId] = useState("");
+   const [priority, setPriority] = useState<TaskPriority>("MEDIUM");
+   const [assignee, setAssignee] = useState("");
+   const [department, setDepartment] = useState("");
+   const [category, setCategory] = useState("");
+-  const [eventAt, setEventAt] = useState("");
+   const [ackRequired, setAckRequired] = useState(false);
+   const [verificationRequired, setVerificationRequired] = useState(false);
+   const [receivedAt, setReceivedAt] = useState("");
+@@ -57,7 +55,7 @@
+ 
+   useEffect(() => {
+     if (!open) return;
+-    setTitle(""); setDescription(""); setTemplateId(""); setPriority("MEDIUM"); setEventAt("");
++    setTitle(""); setDescription(""); setPriority("MEDIUM");
+     setDepartment(""); setCategory("");
+     setAckRequired(false); setVerificationRequired(false); setReceivedAt(""); setSource(""); setAdvanced(false);
+   }, [open]);
+@@ -65,23 +63,11 @@
+     if (open && assignees.length === 1) setAssignee(String(assignees[0].id));
+   }, [open, assignees]);
+ 
+-  const template = templates.find((t) => String(t.id) === templateId) ?? null;
+-  const isEvent = template?.trigger === "EVENT";
+-  // MUI Select hands back the option value as given; every option value here is a string.
+-  const chooseTemplate = (value: string) => {
+-    setTemplateId(value);
+-    setAckRequired(false);
+-    setVerificationRequired(false);
+-    const next = templates.find((t) => String(t.id) === value);
+-    if (next && !title.trim()) setTitle(next.name);
+-  };
+-
+   const previewInput = {
+-    template: template ? template.id : null,
++    template: null,
+     assigned_to: assignee ? Number(assignee) : null,
+-    // A task type decides acknowledgement itself (null = use the template's setting).
+-    acknowledgment_required: template ? null : ackRequired,
+-    trigger_at: isEvent ? istToIso(eventAt) : null,
++    acknowledgment_required: ackRequired,
++    trigger_at: null,
+     priority,
+   };
+   const { data: preview } = useQuery({
+@@ -94,11 +80,11 @@
+     mutationFn: () => tasksApi.create({
+       title, description, priority, assigned_to: Number(assignee),
+       department: Number(department), category: Number(category),
+-      template: template ? template.id : null,
+-      trigger_at: isEvent ? istToIso(eventAt) : null,
++      template: null,
++      trigger_at: null,
+       received_at: istToIso(receivedAt), received_at_source: source || null,
+-      acknowledgment_required: template ? null : ackRequired,
+-      verification_required: template ? null : verificationRequired,
++      acknowledgment_required: ackRequired,
++      verification_required: verificationRequired,
+     }),
+     onSuccess: async (task) => {
+       await qc.invalidateQueries({ queryKey: ["tasks"] });
+@@ -133,15 +119,9 @@
+             <TextField fullWidth label="Description" value={description} onChange={(e) => setDescription(e.target.value)} multiline minRows={1} maxRows={4} {...errorProps("description")} />
+           </Grid>
+           <Grid size={{ xs: 12, sm: 6 }}>
+-            <TextField select fullWidth size="small" label="Task type" value={templateId} onChange={(e) => chooseTemplate(String(e.target.value))}
+-              error={!!(fieldError("template") || fieldError("task_type"))} helperText={fieldError("template") ?? fieldError("task_type")}>
+-              <MenuItem value="">Ad-hoc (no SLA)</MenuItem>
+-              {templates.map((t) => <MenuItem key={t.id} value={String(t.id)}>{t.name}</MenuItem>)}
+-            </TextField>
+-          </Grid>
+-          <Grid size={{ xs: 12, sm: 6 }}>
+-            <TextField select fullWidth label="Priority" value={priority} onChange={(e) => setPriority(e.target.value as TaskPriority)} {...errorProps("priority")}>
+-              {TASK_PRIORITIES.map((p) => <MenuItem key={p} value={p}>{PRIORITY_LABEL[p]}</MenuItem>)}
++            <TextField select fullWidth label="Priority" value={priority} onChange={(e) => setPriority(e.target.value as TaskPriority)}
++              {...errorProps("priority")} helperText={fieldError("priority") ?? "Sets the SLA."}>
++              {TASK_PRIORITIES.map((p) => <MenuItem key={p} value={p}>{TASK_PRIORITY_LABEL[p]}</MenuItem>)}
+             </TextField>
+           </Grid>
+           <Grid size={{ xs: 12, sm: 6 }}>
+@@ -156,12 +136,6 @@
+               {categories.map((c) => <MenuItem key={c.id} value={String(c.id)}>{c.name}</MenuItem>)}
+             </TextField>
+           </Grid>
+-          {isEvent && (
+-            <Grid size={{ xs: 12, sm: 6 }}>
+-              <TextField fullWidth label="Event time (IST)" type="datetime-local" value={eventAt}
+-                onChange={(e) => setEventAt(e.target.value)} InputLabelProps={{ shrink: true }} {...errorProps("trigger_at")} />
+-            </Grid>
+-          )}
+         </Section>
+ 
+         <Section title="Assignment">
+@@ -175,29 +149,13 @@
+         </Section>
+ 
+         <Section title="Configuration">
+-          {template ? (
+-            <>
+-              <Grid size={{ xs: 12, sm: 6 }}>
+-                <Typography variant="body2">
+-                  Acknowledgement: {template.acknowledgment_required ? `Required${ack?.duration_minutes ? ` — ${ack.duration_minutes / 60} hours` : ""}` : "Not required"}
+-                </Typography>
+-              </Grid>
+-              <Grid size={{ xs: 12, sm: 6 }}>
+-                <Typography variant="body2">Verification: {template.verification_required ? "Required" : "Not required"}</Typography>
+-              </Grid>
+-              <Grid size={12}><Typography variant="caption" color="text.secondary">Set by the task type.</Typography></Grid>
+-            </>
+-          ) : (
+-            <>
+-              <Grid size={{ xs: 12, sm: 6 }}>
+-                <FormControlLabel control={<Checkbox size="small" checked={ackRequired} onChange={(e) => setAckRequired(e.target.checked)} />}
+-                  label={ackRequired && ack?.duration_minutes ? `Acknowledgement required — ${ack.duration_minutes / 60} hours` : "Acknowledgement required"} />
+-              </Grid>
+-              <Grid size={{ xs: 12, sm: 6 }}>
+-                <FormControlLabel control={<Checkbox size="small" checked={verificationRequired} onChange={(e) => setVerificationRequired(e.target.checked)} />} label="Verification required" />
+-              </Grid>
+-            </>
+-          )}
++          <Grid size={{ xs: 12, sm: 6 }}>
++            <FormControlLabel control={<Checkbox size="small" checked={ackRequired} onChange={(e) => setAckRequired(e.target.checked)} />}
++              label={ackRequired && ack?.duration_minutes ? `Acknowledgement required — ${ack.duration_minutes / 60} hours` : "Acknowledgement required"} />
++          </Grid>
++          <Grid size={{ xs: 12, sm: 6 }}>
++            <FormControlLabel control={<Checkbox size="small" checked={verificationRequired} onChange={(e) => setVerificationRequired(e.target.checked)} />} label="Verification required" />
++          </Grid>
+           {(fieldError("acknowledgment_required") || fieldError("verification_required")) && (
+             <Grid size={12}>
+               <Typography variant="caption" color="error">{fieldError("acknowledgment_required") ?? fieldError("verification_required")}</Typography>
+--- a/frontend/src/features/tasks/TasksPage.test.tsx
++++ b/frontend/src/features/tasks/TasksPage.test.tsx
+@@ -127,32 +127,23 @@
+     expect(body).toMatchObject({ title: "Upload NAV feed", assigned_to: 10, department: 5, category: 4, template: null, received_at: null });
+   });
+ 
+-  it("takes acknowledgement and SLA from the selected task type (backend preview)", async () => {
+-    const ops = { id: 1, code: "OPS", name: "Operations" };
+-    const templates = [
+-      { id: 6, code: "MAIL_CHECKING", name: "Mail Checking", department: ops, trigger: "LOGIN", fixed_time: null,
+-        resolution_rule_code: "MAIL_SAME_DAY", sla_rule_name: "Mail checking", sla_note: null,
+-        acknowledgment_required: false, verification_required: false },
+-      { id: 4, code: "BROKER_MAPPING", name: "Broker Mapping", department: ops, trigger: "ASSIGNMENT", fixed_time: null,
+-        resolution_rule_code: "BROKER_MAPPING_24H", sla_rule_name: "RM broker mapping", sla_note: null,
+-        acknowledgment_required: true, verification_required: false },
+-    ];
++  it("has no task type: the SLA preview follows the priority and creation sends template null (Change Set 1)", async () => {
+     const previews: Record<string, unknown>[] = [];
+     let created: Record<string, unknown> | null = null;
+     server.use(...taskHandlers([]));
+     server.use(
+-      http.get("*/api/v1/task-templates/", () => HttpResponse.json(templates)),
+       http.post("*/api/v1/tasks/sla-preview/", async ({ request }) => {
+         const body = (await request.json()) as Record<string, unknown>;
+         previews.push(body);
+-        if (body.template === 4) {
+-          return HttpResponse.json({
+-            resolution: makeClock({ rule_name: "RM broker mapping", duration_minutes: 1440, state: "ON_TRACK", elapsed_pct: 0 }),
+-            resolution_note: null,
+-            acknowledgment: makeClock({ kind: "ACK", rule_name: "Acknowledgment clock", duration_minutes: 120 }),
+-          });
+-        }
+-        return HttpResponse.json({ resolution: null, resolution_note: body.template === 6 ? "SLA inactive until company work_end is configured." : "No SLA configured", acknowledgment: null });
++        const critical = body.priority === "URGENT";
++        return HttpResponse.json({
++          resolution: makeClock({
++            rule_name: critical ? "Critical priority — 8 hours" : "Medium priority — 48 hours",
++            duration_minutes: critical ? 480 : 2880, state: "ON_TRACK", elapsed_pct: 0,
++          }),
++          resolution_note: null,
++          acknowledgment: null,
++        });
+       }),
+       http.post("*/api/v1/tasks/", async ({ request }) => {
+         created = (await request.json()) as Record<string, unknown>;
+@@ -165,23 +156,25 @@
+     renderApp("/tasks");
+     await userEvent.click(await screen.findByRole("button", { name: "New task" }));
+     const dialog = await screen.findByRole("dialog", { name: "New task" });
++    expect(within(dialog).queryByRole("combobox", { name: "Task type" })).not.toBeInTheDocument();
++    expect(within(dialog).queryByLabelText("Event time (IST)")).not.toBeInTheDocument();
++    expect(await within(dialog).findByText("Medium priority — 48 hours")).toBeInTheDocument();
++    await waitFor(() => expect(previews.at(-1)).toMatchObject({ template: null, priority: "MEDIUM", trigger_at: null }));
+ 
+-    await userEvent.click(within(dialog).getByRole("combobox", { name: "Task type" }));
+-    await userEvent.click(await screen.findByRole("option", { name: "Mail Checking" }));
+-    expect(await within(dialog).findByText("Acknowledgement: Not required")).toBeInTheDocument();
+-    expect(await within(dialog).findByText("SLA inactive until company work_end is configured.")).toBeInTheDocument();
+-    expect(within(dialog).queryByRole("checkbox", { name: /Acknowledgement/ })).not.toBeInTheDocument();
+-    await waitFor(() => expect(previews.at(-1)).toMatchObject({ template: 6, acknowledgment_required: null }));
+-
+-    await userEvent.click(within(dialog).getByRole("combobox", { name: "Task type" }));
+-    await userEvent.click(await screen.findByRole("option", { name: "Broker Mapping" }));
+-    expect(await within(dialog).findByText("Acknowledgement: Required — 2 hours")).toBeInTheDocument();
+-    expect(await within(dialog).findByText("RM broker mapping")).toBeInTheDocument();
+-    expect(within(dialog).getByLabelText("Title")).toHaveValue("Mail Checking");
++    await userEvent.click(within(dialog).getByRole("combobox", { name: "Priority" }));
++    await userEvent.click(await screen.findByRole("option", { name: "Critical" }));
++    expect(await within(dialog).findByText("Critical priority — 8 hours")).toBeInTheDocument();
++    await waitFor(() => expect(previews.at(-1)).toMatchObject({ template: null, priority: "URGENT" }));
+ 
++    await userEvent.type(within(dialog).getByLabelText("Title"), "Escalated mandate");
++    await userEvent.click(within(dialog).getByRole("checkbox", { name: /Acknowledgement required/ }));
++    await userEvent.click(within(dialog).getByRole("checkbox", { name: "Verification required" }));
+     await classify(dialog, "OPS — Operations", "Operations");
+     await userEvent.click(within(dialog).getByRole("button", { name: "Create Task" }));
+-    await waitFor(() => expect(created).toMatchObject({ template: 4, department: 1, category: 3, acknowledgment_required: null, verification_required: null }));
++    await waitFor(() => expect(created).toMatchObject({
++      template: null, trigger_at: null, priority: "URGENT", department: 1, category: 3,
++      acknowledgment_required: true, verification_required: true,
++    }));
+   });
+ 
+   it("keeps the values and shows each API error on its field", async () => {
+--- a/frontend/src/features/tasks/TasksPage.tsx
++++ b/frontend/src/features/tasks/TasksPage.tsx
+@@ -9,7 +9,7 @@
+ import { ApiErrorAlert } from "../../components/ApiErrorAlert";
+ import { DataTable, type Column } from "../../components/DataTable";
+ import { DateTimeText } from "../../components/DateTimeText";
+-import { acknowledgmentLabel, PRIORITY_LABEL, STATUS_LABEL, VERIFICATION_LABEL } from "./labels";
++import { acknowledgmentLabel, TASK_PRIORITY_LABEL, STATUS_LABEL, VERIFICATION_LABEL } from "./labels";
+ import { SlaBadge } from "./SlaBadge";
+ import { DailyActivities } from "./DailyActivities";
+ import { SourceBadge } from "./SourceBadge";
+@@ -61,7 +61,7 @@
+     { key: "title", header: "Task", render: (t) => <Stack><strong>{t.title}</strong><Typography variant="caption" color="text.secondary">{t.reference}</Typography></Stack> },
+     { key: "source", header: "Source", render: (t) => <SourceBadge source={t.source} /> },
+     { key: "assignee", header: view === "sent" ? "Sent to" : "Assignee", render: (t) => t.assigned_to.full_name },
+-    { key: "priority", header: "Priority", render: (t) => PRIORITY_LABEL[t.priority] },
++    { key: "priority", header: "Priority", render: (t) => TASK_PRIORITY_LABEL[t.priority] },
+     { key: "status", header: "Status", render: (t) => <Chip size="small" label={STATUS_LABEL[t.status]} color={t.status === "BLOCKED" ? "warning" : "default"} /> },
+     { key: "sla", header: "SLA", render: (t) => <SlaBadge clock={t.sla.resolution} note={t.sla.resolution_note} /> },
+     { key: "ack", header: "Acknowledgement", render: (t) => acknowledgmentLabel(t) },
+@@ -91,7 +91,7 @@
+         </TextField>
+         <TextField select label="Priority" value={priority} onChange={(e) => reset(setPriority)(e.target.value)} sx={{ minWidth: 140 }}>
+           <MenuItem value="">All priorities</MenuItem>
+-          {TASK_PRIORITIES.map((p) => <MenuItem key={p} value={p}>{PRIORITY_LABEL[p]}</MenuItem>)}
++          {TASK_PRIORITIES.map((p) => <MenuItem key={p} value={p}>{TASK_PRIORITY_LABEL[p]}</MenuItem>)}
+         </TextField>
+         <Button variant="text" onClick={() => setMoreFilters((v) => !v)} aria-expanded={moreFilters}>
+           {moreFilters ? "Fewer filters" : "More filters"}
+--- a/frontend/src/features/tasks/labels.ts
++++ b/frontend/src/features/tasks/labels.ts
+@@ -16,6 +16,10 @@
+   URGENT: "Urgent",
+ };
+ 
++/** Change Set 1 (D1): task screens show URGENT as "Critical". The stored value stays URGENT and
++ * PRIORITY_LABEL above is unchanged (other screens, including frozen Phase 9 pages, use it). */
++export const TASK_PRIORITY_LABEL: Record<TaskPriority, string> = { ...PRIORITY_LABEL, URGENT: "Critical" };
++
+ export const VERIFICATION_LABEL: Record<VerificationStatus, string> = {
+   NOT_REQUIRED: "Not required",
+   PENDING: "Awaiting verification",

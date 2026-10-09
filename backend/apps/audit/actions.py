@@ -1,0 +1,13 @@
+"""Audit action codes used in Phase 1. One place, so tests and services agree."""
+
+AUTH_LOGIN = "auth.login"
+AUTH_LOGIN_FAILED = "auth.login_failed"
+AUTH_LOGOUT = "auth.logout"
+USER_CREATED = "user.created"
+USER_UPDATED = "user.updated"
+USER_ROLE_CHANGED = "user.role_changed"
+USER_ACTIVATED = "user.activated"
+USER_DEACTIVATED = "user.deactivated"
+USER_PASSWORD_CHANGED = "user.password_changed"
+USER_PASSWORD_SET_BY_ADMIN = "user.password_set_by_admin"
+SYSTEM_INITIAL_ADMIN_CREATED = "system.initial_admin_created"
