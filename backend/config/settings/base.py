@@ -1,4 +1,4 @@
-```python
+
 """Base settings shared by every environment. Secrets and connections come from the environment."""
 
 from pathlib import Path
@@ -212,4 +212,3 @@ LOGGING = {
     "handlers": {"console": {"class": "logging.StreamHandler"}},
     "root": {"handlers": ["console"], "level": "INFO"},
 }
-```
