@@ -370,12 +370,22 @@ class TaskVerification(models.Model):
         return f"{self.task_id} cycle {self.cycle_no}: {self.decision}"
 
 
+class CommentKind(models.TextChoices):
+    COMMENT = "COMMENT", "Comment"
+    # Written ONLY by complete_task, in the same transaction as the completion: what the assignee
+    # reports having done. The comments API can never create one.
+    WORK_RESPONSE = "WORK_RESPONSE", "Work response (submitted on completion)"
+
+
 class TaskComment(models.Model):
-    """Append-only: there is no edit or delete path."""
+    """Append-only: there is no edit or delete path. A WORK_RESPONSE comment is the assignee's
+    report of the work performed, submitted with each completion (author = the assignee,
+    created_at = when it was submitted); a reopened task gets a new one on its next completion."""
 
     task = models.ForeignKey(Task, on_delete=models.PROTECT, related_name="comments")
     author = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="+")
     body = models.TextField()
+    kind = models.CharField(max_length=14, choices=CommentKind.choices, default=CommentKind.COMMENT)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

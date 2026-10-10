@@ -22,6 +22,8 @@ from apps.tasks.models import Task, TaskTemplate
 pytestmark = pytest.mark.django_db
 BASE = "/api/v1/command-center/"
 TASKS = "/api/v1/tasks/"
+# Completing a task requires a work response (extra keys are ignored by the other actions).
+WORK = {"complete": {"work_response": "Work done."}}
 NOW = (2026, 10, 5, 12, 15)
 
 
@@ -54,7 +56,7 @@ def monday(client_for, admin_user, ops, staff, resp, own, new_task, ist):
         feed = Task.objects.get(responsibility__code="FEED_UPLOAD")
         sip = Task.objects.get(responsibility__code="SIP_STP_SWITCH_CHECKING")
         for task, action in ((feed, "start"), (feed, "complete"), (sip, "start")):
-            assert _act(rahul, task, action).status_code == 200
+            assert _act(rahul, task, action, **WORK.get(action, {})).status_code == 200
     return {"rm_emp": rm_emp, "overdue": overdue, "warning": warning, "blocked": blocked,
             "on_track": on_track}
 

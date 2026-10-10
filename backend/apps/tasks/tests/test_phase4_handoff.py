@@ -23,6 +23,8 @@ from apps.tasks.models import (
 )
 
 TASKS = "/api/v1/tasks/"
+# Completing a task requires a work response (extra keys are ignored by the other actions).
+WORK = {"complete": {"work_response": "Work done."}}
 CATEGORIES = "/api/v1/task-categories/"
 PDF = b"%PDF-1.7\n1 0 obj\n<<>>\nendobj\n"
 pytestmark = pytest.mark.django_db
@@ -253,7 +255,9 @@ def test_employee_restrictions_and_allowed_actions(client_for, people, new_task)
     task.refresh_from_db()
     assert rahul.post(f"{TASKS}{task.pk}/start/", {"version": task.version}).status_code == 200
     task.refresh_from_db()
-    assert rahul.post(f"{TASKS}{task.pk}/complete/", {"version": task.version}).status_code == 200
+    assert rahul.post(
+        f"{TASKS}{task.pk}/complete/", {"version": task.version, **WORK["complete"]}
+    ).status_code == 200
 
 
 # --- 9. physical delete -----------------------------------------------------------------------
@@ -332,7 +336,7 @@ def test_delete_in_any_status_including_verified(client_for, people, new_task):
     rahul, manager = client_for(people["rahul"]), client_for(people["manager"])
     for action in ("start", "complete"):
         task.refresh_from_db()
-        rahul.post(f"{TASKS}{task.pk}/{action}/", {"version": task.version})
+        rahul.post(f"{TASKS}{task.pk}/{action}/", {"version": task.version, **WORK.get(action, {})})
     task.refresh_from_db()
     manager.post(f"{TASKS}{task.pk}/verify/", {"version": task.version})
     task.refresh_from_db()
@@ -419,7 +423,8 @@ def _closed(client_for, people, new_task, status):
         rahul = client_for(people["rahul"])
         for action in ("start", "complete"):
             task.refresh_from_db()
-            rahul.post(f"{TASKS}{task.pk}/{action}/", {"version": task.version})
+            body = {"version": task.version, **WORK.get(action, {})}
+            rahul.post(f"{TASKS}{task.pk}/{action}/", body)
     else:
         task.refresh_from_db()
         client_for(people["manager"]).post(

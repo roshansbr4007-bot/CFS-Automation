@@ -140,8 +140,13 @@ export interface TaskDetail extends Task {
   arrived_overdue?: boolean | null;
   /** The acknowledgement SLA was already overdue when the task was generated. */
   ack_arrived_overdue?: boolean | null;
+  /** The work response submitted with the latest completion (required to complete); null until
+   * the task is first completed, and for tasks completed before responses were required. */
+  work_response?: TaskComment | null;
 }
-export interface TaskComment { id: number; author: UserRef; body: string; created_at: string; }
+/** WORK_RESPONSE: the assignee's report of the work performed, submitted with a completion. */
+export type CommentKind = "COMMENT" | "WORK_RESPONSE";
+export interface TaskComment { id: number; author: UserRef; body: string; kind?: CommentKind; created_at: string; }
 export interface TaskAttachment { id: number; original_filename: string; size_bytes: number; sha256: string; uploaded_by: UserRef; created_at: string; }
 export interface AssigneeOption { id: number; full_name: string; department: DepartmentRef; }
 export interface TaskCreateInput {
@@ -177,7 +182,25 @@ export interface Responsibility {
   deadline_minutes?: number | null;
   /** Server-decided: may the signed-in user define the deadline (HR / Admin, active only). */
   can_manage_deadline?: boolean;
+  /** Server-decided: may the signed-in user assign, change or end the owner (HR / Admin only). */
+  can_manage_owner?: boolean;
 }
+/** Today's immediate generation outcome for one schedule, as the server reported it. */
+export interface TodayGeneration {
+  schedule_id: number | null; occurrence_date: string;
+  /** existing = today's task exists; skipped / missed / failed = not generated (see detail). */
+  result: "generated" | "recovered" | "existing" | "skipped" | "missed" | "failed" | "not_due";
+  detail?: string | null;
+}
+/** POST /responsibilities/{id}/owners/: the new owner row plus what happened to today's work. */
+export interface OwnerAssignmentResult extends ResponsibilityOwner {
+  /** Today's open tasks moved from the previous owner (only when the new owner starts today). */
+  transferred_tasks?: { id: number; reference: string; title: string }[];
+  /** Today's immediate generation outcome per schedule (only when the new owner starts today). */
+  today_generation?: TodayGeneration[];
+}
+/** POST /responsibilities/setup/: the created responsibility plus today's generation outcome. */
+export interface ResponsibilitySetupResult extends Responsibility { today_generation?: TodayGeneration[]; }
 export interface ResponsibilityInput {
   code: string; name: string; description?: string; department: number; category: number;
   template?: number | null; priority?: TaskPriority;

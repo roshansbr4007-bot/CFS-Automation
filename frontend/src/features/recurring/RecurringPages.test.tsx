@@ -25,15 +25,23 @@ function responsibility(overrides: Partial<Responsibility> = {}): Responsibility
 }
 
 describe("Responsibilities", () => {
+  // Locked rule A: HR / Admin assign owners (this flow was the Operations Manager's before).
   it("lists responsibilities, assigns an owner and shows the history", async () => {
     let assigned: Record<string, unknown> | null = null;
+    const employeeQueries: URL[] = [];
     server.use(
-      signedInAs("Operations Manager"),
-      http.get("*/api/v1/responsibilities/", () => HttpResponse.json([responsibility()])),
-      http.get("*/api/v1/employees/", () => HttpResponse.json({ count: 1, next: null, previous: null, results: [{ ...RAHUL, email: "", is_active: true }] })),
+      signedInAs("HR"),
+      http.get("*/api/v1/responsibilities/", () => HttpResponse.json([responsibility({ can_manage_owner: true })])),
+      http.get("*/api/v1/employees/", ({ request }) => {
+        employeeQueries.push(new URL(request.url));
+        return HttpResponse.json({ count: 1, next: null, previous: null, results: [{ ...RAHUL, email: "", is_active: true }] });
+      }),
       http.post("*/api/v1/responsibilities/1/owners/", async ({ request }) => {
         assigned = (await request.json()) as Record<string, unknown>;
-        return HttpResponse.json({}, { status: 201 });
+        return HttpResponse.json({
+          id: 2, employee: RAHUL, effective_from: "2026-10-10", effective_to: null, note: "",
+          assigned_by: { id: 1, email: "", full_name: "" }, created_at: "", transferred_tasks: [], today_generation: [],
+        }, { status: 201 });
       }),
       http.get("*/api/v1/responsibilities/1/owners/", () => HttpResponse.json([
         { id: 1, employee: RAHUL, effective_from: "2026-10-01", effective_to: "2026-10-09", note: "", assigned_by: { id: 1, email: "", full_name: "" }, created_at: "" },
@@ -52,6 +60,10 @@ describe("Responsibilities", () => {
     await userEvent.click(within(dialog).getByRole("button", { name: "Assign owner" }));
     await waitFor(() => expect(assigned).toEqual({ employee: 10, effective_from: "2026-10-10", note: "" }));
     await waitForElementToBeRemoved(dialog);
+    // Locked rule B: only employees of the responsibility's department are offered.
+    expect(employeeQueries.length).toBeGreaterThan(0);
+    expect(employeeQueries.every((u) => u.searchParams.get("department") === "1")).toBe(true);
+    expect(await screen.findByText("Rahul Sharma is the owner from 10 Oct 2026.")).toBeInTheDocument();
 
     await userEvent.click(within(table).getByRole("button", { name: "History" }));
     const history = await screen.findByRole("dialog", { name: "Ownership history — Feed Upload" });
@@ -62,6 +74,7 @@ describe("Responsibilities", () => {
     server.use(
       signedInAs("HR"),
       http.get("*/api/v1/responsibilities/", () => HttpResponse.json([responsibility({
+        can_manage_owner: true,
         current_owner: { id: 1, employee: RAHUL, effective_from: "2026-10-01", effective_to: null, note: "", assigned_by: { id: 1, email: "", full_name: "" }, created_at: "" },
       })])),
     );
@@ -71,6 +84,45 @@ describe("Responsibilities", () => {
     expect(within(table).getByRole("button", { name: "Change owner" })).toBeInTheDocument();
     expect(within(table).getByRole("button", { name: "Add schedule" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Add responsibility" })).toBeInTheDocument();
+  });
+
+  it("gives an Operations Manager no owner change, but keeps their other actions", async () => {
+    server.use(
+      signedInAs("Operations Manager"),
+      http.get("*/api/v1/responsibilities/", () => HttpResponse.json([responsibility({ can_manage_owner: false })])),
+    );
+    renderApp("/responsibilities");
+    const table = await screen.findByRole("table", { name: "Responsibilities" });
+    expect(await within(table).findByText("Feed Upload")).toBeInTheDocument();
+    expect(within(table).queryByRole("button", { name: "Change owner" })).not.toBeInTheDocument();
+    expect(within(table).getByRole("button", { name: "Edit" })).toBeInTheDocument();
+    expect(within(table).getByRole("button", { name: "Add schedule" })).toBeInTheDocument();
+  });
+
+  it("reports what happened to today's work after an owner change", async () => {
+    server.use(
+      signedInAs("Admin"),
+      http.get("*/api/v1/responsibilities/", () => HttpResponse.json([responsibility({ can_manage_owner: true })])),
+      http.get("*/api/v1/employees/", () => HttpResponse.json({ count: 1, next: null, previous: null, results: [{ ...RAHUL, email: "", is_active: true }] })),
+      http.post("*/api/v1/responsibilities/1/owners/", () => HttpResponse.json({
+        id: 2, employee: RAHUL, effective_from: "2026-10-05", effective_to: null, note: "",
+        assigned_by: { id: 1, email: "", full_name: "" }, created_at: "",
+        transferred_tasks: [{ id: 7, reference: "T-000007", title: "Feed Upload — 05 Oct 2026" }],
+        today_generation: [{ schedule_id: 4, occurrence_date: "2026-10-05", result: "skipped",
+          detail: "The responsible employee (Old Owner) is inactive." }],
+      }, { status: 201 })),
+    );
+    renderApp("/responsibilities");
+    const table = await screen.findByRole("table", { name: "Responsibilities" });
+    await userEvent.click(await within(table).findByRole("button", { name: "Change owner" }));
+    const dialog = await screen.findByRole("dialog", { name: "Owner of Feed Upload" });
+    await userEvent.click(within(dialog).getByRole("combobox", { name: "New owner" }));
+    await userEvent.click(await screen.findByRole("option", { name: "Rahul Sharma (OPS)" }));
+    await userEvent.type(within(dialog).getByLabelText("Owner from"), "2026-10-05");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Assign owner" }));
+    const notice = await screen.findByText(/Today's open task T-000007 moved to them/);
+    expect(notice).toHaveTextContent("Today's task was skipped: The responsible employee (Old Owner) is inactive. See the schedule's occurrences.");
+    expect(notice.closest("[role='alert']")).toHaveClass("MuiAlert-standardWarning");
   });
 
   it("is not available to an employee", async () => {

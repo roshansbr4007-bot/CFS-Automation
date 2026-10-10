@@ -11,14 +11,14 @@ import type { TaskAction, TaskDetail } from "../../api/types";
 import { DateTimeText } from "../../components/DateTimeText";
 import { acknowledgmentLabel, PRIORITY_LABEL, STATUS_LABEL, VERIFICATION_LABEL } from "./labels";
 
-type Prompt = "block" | "cancel" | "verify" | "reject_verification" | "reassign" | null;
+type Prompt = "block" | "cancel" | "verify" | "reject_verification" | "reassign" | "complete" | null;
 
 const SIMPLE_ACTIONS: { action: TaskAction; label: string; endpoint: string }[] = [
   { action: "acknowledge", label: "Acknowledge", endpoint: "acknowledge" },
   { action: "start", label: "Start", endpoint: "start" },
-  { action: "complete", label: "Complete", endpoint: "complete" },
   { action: "unblock", label: "Resume", endpoint: "unblock" },
 ];
+const WORK_RESPONSE_MAX = 5000;
 const PROMPT_ACTIONS: { action: Exclude<Prompt, null>; label: string }[] = [
   { action: "block", label: "Put on hold" },
   { action: "reassign", label: "Reassign" },
@@ -66,6 +66,10 @@ export function TaskDetailDialog({ taskId, onClose }: { taskId: number | null; o
   const [remarks, setRemarks] = useState("");
   const [newAssignee, setNewAssignee] = useState("");
   const [comment, setComment] = useState("");
+  const [draft, setDraft] = useState<{ taskId: number | null; text: string }>({ taskId, text: "" });
+  const workResponse = draft.taskId === taskId ? draft.text : "";
+  const setWorkResponse = (text: string) => setDraft({ taskId, text });
+  const responseLength = Array.from(workResponse.trim()).length;
 
   const refresh = async () => {
     await Promise.all([
@@ -78,7 +82,14 @@ export function TaskDetailDialog({ taskId, onClose }: { taskId: number | null; o
   const act = useMutation({
     mutationFn: ({ endpoint, body }: { endpoint: string; body: Record<string, unknown> }) =>
       tasksApi.action(taskId!, endpoint, { version: (task as TaskDetail).version, ...body }),
-    onSuccess: async () => { closePrompt(); await refresh(); },
+    onSuccess: async (_updated, { endpoint }) => {
+      if (endpoint === "complete") {
+        setWorkResponse("");
+        await qc.invalidateQueries({ queryKey: ["task-comments", taskId] });
+      }
+      closePrompt();
+      await refresh();
+    },
     onError: async (error) => {
       if (error instanceof ApiError && error.code === "version_conflict") { closePrompt(); await refresh(); }
     },
@@ -97,11 +108,15 @@ export function TaskDetailDialog({ taskId, onClose }: { taskId: number | null; o
     if (prompt === "verify") act.mutate({ endpoint: "verify", body: { remarks } });
     if (prompt === "reject_verification") act.mutate({ endpoint: "reject-verification", body: { reason, remarks } });
     if (prompt === "reassign") act.mutate({ endpoint: "reassign", body: { assigned_to: Number(newAssignee), note: remarks } });
+    if (prompt === "complete") act.mutate({ endpoint: "complete", body: { work_response: workResponse.trim() } });
   };
   const promptReady =
     (prompt === "block" || prompt === "cancel") ? !!reason.trim()
       : prompt === "reject_verification" ? !!reason.trim() && !!remarks.trim()
-        : prompt === "reassign" ? !!newAssignee : prompt === "verify";
+        : prompt === "reassign" ? !!newAssignee
+          : prompt === "complete" ? responseLength > 0 && responseLength <= WORK_RESPONSE_MAX
+            : prompt === "verify";
+  const workResponseErrors = prompt === "complete" && act.error instanceof ApiError ? act.error.fields?.work_response : undefined;
 
   const onFile = (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -128,6 +143,10 @@ export function TaskDetailDialog({ taskId, onClose }: { taskId: number | null; o
                 <Button key={a.action} variant="contained" size="small" disabled={act.isPending}
                   onClick={() => act.mutate({ endpoint: a.endpoint, body: {} })}>{a.label}</Button>
               ))}
+              {allowed.has("complete") && (
+                <Button variant="contained" size="small" disabled={act.isPending}
+                  onClick={() => { act.reset(); setPrompt("complete"); }}>Submit Response &amp; Complete</Button>
+              )}
               {PROMPT_ACTIONS.filter((a) => allowed.has(a.action)).map((a) => (
                 <Button key={a.action} variant="outlined" size="small" disabled={act.isPending}
                   onClick={() => setPrompt(a.action)}>{a.label}</Button>
@@ -136,6 +155,14 @@ export function TaskDetailDialog({ taskId, onClose }: { taskId: number | null; o
             {prompt && (
               <Box sx={{ p: 2, border: 1, borderColor: "divider", borderRadius: 1 }}>
                 <Stack spacing={2}>
+                  {prompt === "complete" && (
+                    <TextField
+                      label="Work performed" value={workResponse} onChange={(e) => setWorkResponse(e.target.value)}
+                      required multiline minRows={3} disabled={act.isPending}
+                      error={!!workResponseErrors || responseLength > WORK_RESPONSE_MAX}
+                      helperText={workResponseErrors?.join(" ") ?? "Describe the work you did. The task is completed immediately; your manager can read this response."}
+                    />
+                  )}
                   {prompt === "reassign" && (
                     <TextField select label="New assignee" value={newAssignee} onChange={(e) => setNewAssignee(e.target.value)}>
                       {assignees.filter((a) => a.id !== task.assigned_to.id).map((a) =>
@@ -150,8 +177,10 @@ export function TaskDetailDialog({ taskId, onClose }: { taskId: number | null; o
                       onChange={(e) => setRemarks(e.target.value)} required={prompt === "reject_verification"} multiline />
                   )}
                   <Stack direction="row" spacing={1}>
-                    <Button variant="contained" disabled={!promptReady || act.isPending} onClick={submitPrompt}>Confirm</Button>
-                    <Button onClick={closePrompt}>Back</Button>
+                    <Button variant="contained" disabled={!promptReady || act.isPending} onClick={submitPrompt}>
+                      {prompt === "complete" ? (act.isPending ? "Submitting…" : "Submit & complete") : "Confirm"}
+                    </Button>
+                    <Button disabled={act.isPending} onClick={() => { if (prompt === "complete") act.reset(); closePrompt(); }}>Back</Button>
                   </Stack>
                 </Stack>
               </Box>
@@ -170,6 +199,18 @@ export function TaskDetailDialog({ taskId, onClose }: { taskId: number | null; o
               <Field label="SLA">Deadlines and SLA tracking arrive in a later phase.</Field>
             </Stack>
             {task.description && <Typography sx={{ whiteSpace: "pre-wrap" }}>{task.description}</Typography>}
+            {task.work_response && (
+              <Box aria-label="Work response" component="section">
+                <Typography variant="h3" component="h2">Work response</Typography>
+                {task.status !== "COMPLETED" && (
+                  <Typography variant="body2" color="text.secondary">Previous response — the task was reopened and needs a new response to complete.</Typography>
+                )}
+                <Typography variant="caption" color="text.secondary">
+                  {task.work_response.author.full_name || task.work_response.author.email} · <DateTimeText value={task.work_response.created_at} />
+                </Typography>
+                <Typography variant="body2" sx={{ whiteSpace: "pre-wrap" }}>{task.work_response.body}</Typography>
+              </Box>
+            )}
             <Divider />
             <Typography variant="h3" component="h2">Verification history</Typography>
             {task.verifications.length === 0 ? <Typography variant="body2" color="text.secondary">No verification decisions yet.</Typography> : (
@@ -213,6 +254,7 @@ export function TaskDetailDialog({ taskId, onClose }: { taskId: number | null; o
                 {comments.map((c) => (
                   <Box key={c.id}>
                     <Typography variant="caption" color="text.secondary">{c.author.full_name || c.author.email} · <DateTimeText value={c.created_at} /></Typography>
+                    {c.kind === "WORK_RESPONSE" && <Chip size="small" variant="outlined" color="primary" label="Work response" sx={{ ml: 1, height: 18 }} />}
                     <Typography variant="body2" sx={{ whiteSpace: "pre-wrap" }}>{c.body}</Typography>
                   </Box>
                 ))}

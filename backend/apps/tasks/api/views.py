@@ -20,6 +20,7 @@ from .serializers import (
     AssigneeOptionSerializer,
     AttachmentUploadSerializer,
     CommentCreateSerializer,
+    CompleteSerializer,
     DailyActivityListSerializer,
     DeleteQuerySerializer,
     ReasonSerializer,
@@ -218,10 +219,10 @@ class TaskViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewsets.Gen
         data = self._validated(VersionSerializer)
         return self._detail(services.start_task(actor=request.user, task=self.get_object(), **data))
 
-    @_action_schema(VersionSerializer, "Complete (assignee only)")
+    @_action_schema(CompleteSerializer, "Submit the work response and complete (assignee only)")
     @action(detail=True, methods=["post"])
     def complete(self, request, pk=None):
-        data = self._validated(VersionSerializer)
+        data = self._validated(CompleteSerializer)
         task = services.complete_task(actor=request.user, task=self.get_object(), **data)
         return self._detail(task)
 

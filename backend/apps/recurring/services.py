@@ -4,6 +4,13 @@ Scope: Admin and HR manage everything (organisation-wide); an Operations Manager
 responsibilities of the department of their own ACTIVE employee record. Schedules follow the
 same scope (Phase A); Admin's global `manage_schedules` authority is unchanged.
 
+Owners (locked rules A/B/E): only HR and Admin (`manage_all_responsibilities`) assign, change or
+end an owner; an Operations Manager keeps every other management action of their department. An
+owner always belongs to the responsibility's department. When a new owner starts TODAY, today's
+open generated task of the previous owner moves to them through the existing task reassignment
+(clocks, deadline, status, comments, attachments and history kept; the previous owner is
+notified). Tasks already completed or cancelled never move.
+
 Responsibility deadline (SLA): only HR / Admin (`manage_all_responsibilities`) define, change
 or clear it. It is a versioned DURATION SlaRule "RESP_<id>": a change supersedes the rule (tasks
 already generated keep their deadline), clearing unlinks it (the rule and its history remain).
@@ -18,8 +25,11 @@ from apps.audit.services import record
 from apps.calendars.services import resolve_scheduled_date
 from apps.core.errors import AppError, ConflictError, FieldValidationError
 from apps.core.timeutils import to_ist
+from apps.notifications.services import notify_task_transferred
 from apps.org.selectors import team_department_id
 from apps.sla import services as sla_services
+from apps.tasks import services as task_services
+from apps.tasks.models import Task, TaskSource, TaskStatus
 
 from . import perms
 from .models import (
@@ -76,6 +86,30 @@ def can_manage(user, responsibility_or_department_id) -> bool:
 def _require_manage(user, target) -> None:
     if not can_manage(user, target):
         raise RecurringPermissionDenied()
+
+
+def can_manage_owner(user) -> bool:
+    """Locked rule A: HR and Admin (the organisation-wide responsibility authority; there is no
+    separate Boss role) assign, change and end owners. Not an Operations Manager."""
+    return user.has_perm(perms.MANAGE_ALL_RESPONSIBILITIES)
+
+
+def _require_owner_authority(user) -> None:
+    if not can_manage_owner(user):
+        raise RecurringPermissionDenied(
+            "Only HR or Admin can assign or change a responsibility owner."
+        )
+
+
+OWNER_DEPARTMENT_MESSAGE = "The owner must belong to the responsibility's department ({code})."
+
+
+def _check_owner_department(responsibility, employee) -> None:
+    """Locked rule B: an owner always belongs to the responsibility's department."""
+    if employee.department_id != responsibility.department_id:
+        raise FieldValidationError(fields={"employee": [
+            OWNER_DEPARTMENT_MESSAGE.format(code=responsibility.department.code)
+        ]})
 
 
 def _audit(action, entity_type, entity_id, actor, *, old=None, new=None, extra=None):
@@ -206,6 +240,18 @@ def update_responsibility(
         if "department" in changes and changes["department"].pk != r.department_id:
             if not actor.has_perm(perms.MANAGE_ALL_RESPONSIBILITIES):
                 raise RecurringPermissionDenied("Only Admin may move a responsibility.")
+            # Locked rule B: a move may not leave a current or future owner in another department.
+            other = (
+                r.owners.filter(superseded_at__isnull=True)
+                .exclude(effective_to__lt=today_ist())
+                .exclude(employee__department_id=changes["department"].pk)
+            )
+            if other.exists():
+                raise FieldValidationError(fields={"department": [
+                    "Its current or a planned owner belongs to another department. End that "
+                    "ownership first, move the responsibility, then assign an owner of the new "
+                    "department."
+                ]})
         if "category" in changes and not changes["category"].is_active:
             raise FieldValidationError(fields={"category": ["This category is not active."]})
         if "name" in changes:
@@ -293,12 +339,18 @@ def assign_owner(
     *, actor, responsibility, employee, effective_from: date, note=""
 ) -> ResponsibilityOwner:
     """Make `employee` the owner from `effective_from` on. The current period is closed the day
-    before; history is never rewritten, and tasks already generated keep their assignee.
+    before; history is never rewritten, and tasks of other days keep their assignee.
 
     Phase 5.2 same-day correction: when the new owner starts TODAY and the current period started
     today or later (a mistaken or future-dated configuration), that period is marked superseded
     (kept for history and audit, never resolved as owner) and the new owner applies from today.
-    Activities already generated keep their assignee; reassign them through the task workflow."""
+
+    Locked rules A/B/E: HR / Admin only; the owner belongs to the responsibility's department;
+    when the new owner starts today, today's OPEN generated tasks of today's previous owner move
+    to them through tasks.services.reassign_task in this same transaction (all or nothing), and
+    the previous owner is notified. Completed or cancelled tasks never move; tasks of other days
+    keep their assignee. The moved tasks are returned on the row as `transferred_tasks`."""
+    _require_owner_authority(actor)
     if not employee.is_active:
         raise FieldValidationError(fields={"employee": ["The employee is not active."]})
     if effective_from < today_ist():
@@ -309,6 +361,9 @@ def assign_owner(
         r = Responsibility.objects.select_for_update().get(pk=responsibility.pk)
         _require_manage(actor, r)
         _require_active(r.pk)
+        _check_owner_department(r, employee)
+        today = today_ist()
+        before_today = current_owner_row(r, today) if effective_from == today else None
         open_row = r.owners.filter(effective_to__isnull=True, superseded_at__isnull=True).first()
         previous = None
         corrected = False
@@ -337,6 +392,11 @@ def assign_owner(
             note=(note or "").strip(),
             assigned_by=actor,
         )
+        transferred = []
+        if before_today is not None and before_today.employee_id != employee.pk:
+            transferred = _transfer_todays_tasks(
+                actor, r, today, before_today.employee, employee, row.note
+            )
         if corrected:
             action = "responsibility.owner_corrected"
         else:
@@ -359,14 +419,51 @@ def assign_owner(
                 else None
             ),
             new={"employee_id": employee.pk, "effective_from": effective_from.isoformat()},
-            extra={"department_id": r.department_id, "note": row.note},
+            extra={
+                "department_id": r.department_id,
+                "note": row.note,
+                "transferred_task_ids": [t.pk for t in transferred],
+            },
         )
+    row.transferred_tasks = transferred
     return row
+
+
+def _transfer_todays_tasks(actor, responsibility, today, previous, new_owner, note) -> list:
+    """Locked rule E: move today's OPEN generated tasks of `previous` to `new_owner` with the
+    existing reassignment (its own permission checks, TaskAssignment history, audit and SLA rule:
+    the resolution clock is never reset; an acknowledgment, when required, restarts for the new
+    assignee as on any reassignment). Rows are locked first; a concurrent change of one of these
+    tasks makes the whole owner change fail with a conflict instead of half-applying."""
+    reason = f"Responsibility owner changed to {new_owner.full_name}"
+    if note:
+        reason = f"{reason}: {note}"
+    tasks = list(
+        Task.objects.select_for_update()
+        .filter(
+            responsibility=responsibility,
+            source=TaskSource.SCHEDULED,
+            occurrence_date=today,
+            assigned_to=previous,
+            status__in=(TaskStatus.PENDING, TaskStatus.IN_PROGRESS, TaskStatus.BLOCKED),
+        )
+        .order_by("pk")
+    )
+    moved = []
+    for task in tasks:
+        moved_task = task_services.reassign_task(
+            actor=actor, task=task, version=task.version, assigned_to=new_owner, note=reason
+        )
+        assignment = moved_task.assignments.order_by("-assigned_at", "-id").first()
+        notify_task_transferred(moved_task, previous, new_owner, assignment)
+        moved.append(moved_task)
+    return moved
 
 
 def end_ownership(*, actor, responsibility, last_day: date, note="") -> ResponsibilityOwner:
     """The current owner stops after `last_day`; from then on nobody owns it (occurrences are
     SKIPPED and reported until a new owner is assigned)."""
+    _require_owner_authority(actor)
     if last_day < today_ist():
         raise FieldValidationError(fields={"last_day": ["Cannot end ownership in the past."]})
     with transaction.atomic():

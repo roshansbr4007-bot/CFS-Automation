@@ -13,3 +13,4 @@ frontend/playwright-report/
 .DS_Store
 staticfiles/
 backend/media/
+backend/celerybeat-schedule*

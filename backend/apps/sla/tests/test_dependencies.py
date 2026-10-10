@@ -62,7 +62,9 @@ def _complete(task, user):
     if task.status == "PENDING":
         _start(task, user)
         task.refresh_from_db()
-    return task_services.complete_task(actor=user, task=task, version=task.version)
+    return task_services.complete_task(
+        actor=user, task=task, version=task.version, work_response="Work done."
+    )
 
 
 def _verify(task, user):

@@ -35,16 +35,16 @@ def _generate(ist, *at):
         return generator.generate_due_occurrences()
 
 
-def _act(client, task, name):
+def _act(client, task, name, **body):
     task.refresh_from_db()
-    return client.post(f"{TASKS}{task.pk}/{name}/", {"version": task.version})
+    return client.post(f"{TASKS}{task.pk}/{name}/", {"version": task.version, **body})
 
 
 def _complete(client_for, user, task, ist, *at):
     with time_machine.travel(ist(*at), tick=False):
         client = client_for(user)
         assert _act(client, task, "start").status_code == 200
-        assert _act(client, task, "complete").status_code == 200
+        assert _act(client, task, "complete", work_response="Work done.").status_code == 200
 
 
 def _mine(client_for, user, ist, *at, **params):
@@ -163,7 +163,7 @@ def busy_monday(client_for, ops, owners, new_task, ist):
     with time_machine.travel(ist(2026, 10, 5, 12, 30), tick=False):
         client = client_for(ops["rahul"])
         _act(client, done, "start")
-        _act(client, done, "complete")
+        _act(client, done, "complete", work_response="Work done.")
     return {"overdue": overdue, "done": done}
 
 

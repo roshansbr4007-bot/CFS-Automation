@@ -1,11 +1,14 @@
 """Phase 5.2: same-day responsibility owner correction, and generated activities that are
-reassigned after a correction. Ownership history is never deleted or rewritten."""
+reassigned after a correction. Ownership history is never deleted or rewritten.
+Locked rules A/E: HR / Admin change owners; today's open activity of the replaced owner moves to
+the new owner automatically (through the existing reassignment)."""
 
 from datetime import date
 
 import pytest
 import time_machine
 
+from apps.accounts import roles
 from apps.audit.models import AuditLog
 from apps.recurring import generator
 from apps.recurring.models import ResponsibilityOwner
@@ -22,7 +25,7 @@ def _owners_url(responsibility):
 
 
 def test_same_day_correction_supersedes_the_mistaken_owner_and_keeps_history(
-    client_for, admin_user, ops, resp, ist
+    client_for, make_user, admin_user, ops, resp, ist
 ):
     """Monday 5 Oct: the Admin was set up as owner from today by mistake; the operations
     employee is made owner from today. The Admin row is kept, marked superseded."""
@@ -32,13 +35,14 @@ def test_same_day_correction_supersedes_the_mistaken_owner_and_keeps_history(
             actor=admin_user, responsibility=feed, employee=ops["manager_emp"],
             effective_from=date(2026, 10, 5),
         )
-        response = client_for(ops["manager"]).post(
+        hr = make_user(roles.HR)  # locked rule A (was the Operations Manager)
+        response = client_for(hr).post(
             _owners_url(feed), {"employee": ops["rahul_emp"].pk, "effective_from": "2026-10-05"}
         )
         assert response.status_code == 201
         assert current_owner_row(feed).employee == ops["rahul_emp"]
     mistaken.refresh_from_db()
-    assert mistaken.superseded_at is not None and mistaken.superseded_by == ops["manager"]
+    assert mistaken.superseded_at is not None and mistaken.superseded_by == hr
     assert ResponsibilityOwner.objects.filter(responsibility=feed).count() == 2  # nothing deleted
     history = client_for(ops["manager"]).get(_owners_url(feed)).json()
     assert [(h["employee"]["id"], h["superseded_at"] is not None) for h in history] == [
@@ -77,12 +81,12 @@ def test_a_future_dated_mistake_can_be_corrected_from_today(admin_user, ops, res
     assert future.superseded_at is not None and future.effective_to is None
 
 
-def test_corrections_are_only_for_today(client_for, admin_user, ops, resp, ist):
+def test_corrections_are_only_for_today(client_for, make_user, admin_user, ops, resp, ist):
     feed = resp("FEED_UPLOAD")
     with time_machine.travel(ist(2026, 10, 5, 8, 0), tick=False):
         assign_owner(actor=admin_user, responsibility=feed, employee=ops["manager_emp"],
                      effective_from=date(2026, 10, 9))
-        later = client_for(ops["manager"]).post(
+        later = client_for(make_user(roles.HR)).post(  # locked rule A (was the Ops Manager)
             _owners_url(feed), {"employee": ops["rahul_emp"].pk, "effective_from": "2026-10-08"}
         )
     assert later.status_code == 400 and "effective_from" in later.json()["fields"]
@@ -93,7 +97,9 @@ def test_a_generated_activity_is_reassigned_without_moving_its_schedule(
     client_for, admin_user, ops, resp, ist
 ):
     """Today's activity was generated for the mistaken owner: it is not deleted or duplicated;
-    it is reassigned, keeping its 10:00 start and 12:00 deadline and its assignment history."""
+    it is reassigned, keeping its 10:00 start and 12:00 deadline and its assignment history.
+    Locked rule E: the owner correction itself now moves it (through the same reassignment) -
+    the manual reassign call this test used before is no longer needed."""
     feed = resp("FEED_UPLOAD")
     with time_machine.travel(ist(2026, 10, 5, 8, 0), tick=False):
         assign_owner(actor=admin_user, responsibility=feed, employee=ops["manager_emp"],
@@ -103,13 +109,9 @@ def test_a_generated_activity_is_reassigned_without_moving_its_schedule(
     task = Task.objects.get(responsibility=feed)
     assert task.assigned_to == ops["manager_emp"]
     with time_machine.travel(ist(2026, 10, 5, 10, 20), tick=False):
-        assign_owner(actor=admin_user, responsibility=feed, employee=ops["rahul_emp"],
-                     effective_from=date(2026, 10, 5))
-        moved = client_for(ops["manager"]).post(
-            f"{TASKS}{task.pk}/reassign/",
-            {"version": task.version, "assigned_to": ops["rahul_emp"].pk, "note": "Owner fix"},
-        )
-        assert moved.status_code == 200
+        row = assign_owner(actor=admin_user, responsibility=feed, employee=ops["rahul_emp"],
+                           effective_from=date(2026, 10, 5))
+        assert [t.pk for t in row.transferred_tasks] == [task.pk]
         assert generator.generate_due_occurrences()["generated"] == 0  # no duplicate
     task.refresh_from_db()
     assert task.assigned_to == ops["rahul_emp"] and task.source == "SCHEDULED"

@@ -217,7 +217,10 @@ def test_a_scheduled_dependency_task_still_waits_and_starts_from_its_prerequisit
         brokerage.refresh_from_db()
         task_services.start_task(actor=ops["rahul"], task=brokerage, version=brokerage.version)
         brokerage.refresh_from_db()
-        task_services.complete_task(actor=ops["rahul"], task=brokerage, version=brokerage.version)
+        task_services.complete_task(
+            actor=ops["rahul"], task=brokerage, version=brokerage.version,
+            work_response="Work done.",
+        )
     started = clock(task)
     assert (started.trigger, started.start_at) == ("DEPENDENCY", ist(2026, 10, 5, 15, 0))
     generated = AuditLog.objects.get(action="recurring.task_generated")
@@ -370,7 +373,9 @@ def test_completing_before_any_monitor_pass_fabricates_no_alert(admin_user, ops)
     with at(2026, 10, 5, 12, 35):
         task_services.start_task(actor=ops["rahul"], task=task, version=task.version)
         task.refresh_from_db()
-        task_services.complete_task(actor=ops["rahul"], task=task, version=task.version)
+        task_services.complete_task(
+            actor=ops["rahul"], task=task, version=task.version, work_response="Work done."
+        )
     result = tick(2026, 10, 5, 12, 36)
     assert result["thresholds"] == 0
     resolution = clock(task)
@@ -383,7 +388,9 @@ def test_completing_before_any_monitor_pass_fabricates_no_alert(admin_user, ops)
     with at(2026, 10, 6, 10, 10):
         task_services.start_task(actor=ops["rahul"], task=early, version=early.version)
         early.refresh_from_db()
-        task_services.complete_task(actor=ops["rahul"], task=early, version=early.version)
+        task_services.complete_task(
+            actor=ops["rahul"], task=early, version=early.version, work_response="Work done."
+        )
     assert tick(2026, 10, 6, 12, 30)["thresholds"] == 0
     entry = AuditLog.objects.get(action="recurring.task_generated",
                                  new_value__task_id=early.pk)

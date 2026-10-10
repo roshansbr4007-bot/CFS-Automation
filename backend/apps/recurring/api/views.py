@@ -8,15 +8,17 @@ from rest_framework.response import Response
 
 from apps.core.serializers import ErrorSerializer
 
-from .. import perms, selectors, services
+from .. import generator, perms, selectors, services
 from ..models import RecurringSchedule, Responsibility, ScheduleOccurrence
 from .serializers import (
     AssignOwnerSerializer,
     EndOwnershipSerializer,
+    OwnerAssignmentResultSerializer,
     RecurringScheduleSerializer,
     ResponsibilityCreateSerializer,
     ResponsibilityOwnerSerializer,
     ResponsibilitySerializer,
+    ResponsibilitySetupResultSerializer,
     ResponsibilitySetupSerializer,
     ResponsibilityUpdateSerializer,
     ScheduleCreateSerializer,
@@ -90,7 +92,7 @@ class ResponsibilityViewSet(
 
     @extend_schema(
         request=ResponsibilitySetupSerializer,
-        responses={201: ResponsibilitySerializer, **_ERRORS},
+        responses={201: ResponsibilitySetupResultSerializer, **_ERRORS},
         summary="Create a responsibility, its optional owner and its first schedule at once",
     )
     @action(detail=False, methods=["post"], url_path="setup")
@@ -109,7 +111,16 @@ class ResponsibilityViewSet(
             owner=dict(owner) if owner else None,
             schedule=schedule,
         )
-        return self._fresh(responsibility, status.HTTP_201_CREATED)
+        today = []
+        if owner and owner["effective_from"] == services.today_ist():
+            # Locked rule D: today's eligible occurrence at once, after the setup committed.
+            today = generator.generate_today(responsibility)
+        fresh = Responsibility.objects.get(pk=responsibility.pk)
+        context = {"request": request, "today_generation": today}
+        return Response(
+            ResponsibilitySetupResultSerializer(fresh, context=context).data,
+            status=status.HTTP_201_CREATED,
+        )
 
     @extend_schema(responses={200: ResponsibilitySerializer(many=True), **_ERRORS})
     def list(self, request, *args, **kwargs):
@@ -144,7 +155,7 @@ class ResponsibilityViewSet(
     @extend_schema(
         methods=["POST"],
         request=AssignOwnerSerializer,
-        responses={201: ResponsibilityOwnerSerializer, **_ERRORS},
+        responses={201: OwnerAssignmentResultSerializer, **_ERRORS},
     )
     @action(detail=True, methods=["get", "post"])
     def owners(self, request, pk=None):
@@ -156,7 +167,17 @@ class ResponsibilityViewSet(
             return Response(ResponsibilityOwnerSerializer(rows, many=True).data)
         data = _validated(AssignOwnerSerializer, request.data)
         row = services.assign_owner(actor=request.user, responsibility=responsibility, **data)
-        return Response(ResponsibilityOwnerSerializer(row).data, status=status.HTTP_201_CREATED)
+        # Committed. Locked rule D: when the owner starts today, today's eligible occurrence is
+        # generated (or recovered) now instead of waiting for the per-minute run; the outcome is
+        # reported as it happened, never assumed.
+        row.today_generation = (
+            generator.generate_today(responsibility)
+            if row.effective_from == services.today_ist()
+            else []
+        )
+        return Response(
+            OwnerAssignmentResultSerializer(row).data, status=status.HTTP_201_CREATED
+        )
 
     @extend_schema(
         request=EndOwnershipSerializer, responses={200: ResponsibilityOwnerSerializer, **_ERRORS}

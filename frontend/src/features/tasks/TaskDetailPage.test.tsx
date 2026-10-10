@@ -1,4 +1,4 @@
-import { screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { describe, expect, it } from "vitest";
@@ -34,7 +34,8 @@ describe("Task detail page", () => {
     expect(bar.getByRole("button", { name: "Start" })).toBeInTheDocument();
     expect(bar.getByRole("button", { name: "Put on hold" })).toBeInTheDocument();
     expect(bar.getByRole("button", { name: "Cancel task" })).toBeInTheDocument();
-    expect(bar.queryByRole("button", { name: "Complete Task" })).not.toBeInTheDocument();
+    expect(bar.queryByRole("button", { name: "Submit Response & Complete" })).not.toBeInTheDocument();
+    expect(bar.queryByRole("button", { name: /^Complete/ })).not.toBeInTheDocument();
     for (const name of ["Assignment", "Timeline", "SLA", "Comments", "Attachments"]) {
       expect(screen.getByRole("region", { name })).toBeInTheDocument();
     }
@@ -73,18 +74,138 @@ describe("Task detail page", () => {
     expect(screen.queryByLabelText("Add a comment")).not.toBeInTheDocument();
   });
 
-  it("completes with the server time and shows it; no date can be chosen", async () => {
+  const RESPONSE = { id: 9, author: { id: 3, email: "rahul@example.com", full_name: "Rahul Sharma" }, body: "Uploaded the feed and checked the totals.", kind: "WORK_RESPONSE" as const, created_at: "2026-10-05T12:12:00Z" };
+
+  async function openCompletion() {
+    await userEvent.click((await actions()).getByRole("button", { name: "Submit Response & Complete" }));
+    const dialog = await screen.findByRole("dialog", { name: "Submit work response" });
+    return { dialog: within(dialog), field: within(dialog).getByLabelText(/Work performed/), submit: within(dialog).getByRole("button", { name: "Submit & complete" }) };
+  }
+
+  it("requires a work response, sends it trimmed and completes with the server time", async () => {
     let body: unknown = null;
-    serve(makeTask({ status: "IN_PROGRESS", allowed_actions: ["complete", "block"] }));
+    let current = makeTask({ status: "IN_PROGRESS", allowed_actions: ["complete", "block"] });
+    serve(current);
+    server.use(http.get("*/api/v1/tasks/1/", () => HttpResponse.json(current))); // reload after completing
     server.use(http.post("*/api/v1/tasks/1/complete/", async ({ request }) => {
       body = await request.json();
-      return HttpResponse.json(makeTask({ status: "COMPLETED", completed_at: "2026-10-05T12:12:00Z", allowed_actions: [] }));
+      current = makeTask({ status: "COMPLETED", completed_at: "2026-10-05T12:12:00Z", allowed_actions: [], work_response: RESPONSE });
+      return HttpResponse.json(current);
     }));
     renderApp("/tasks/1");
-    await userEvent.click((await actions()).getByRole("button", { name: "Complete Task" }));
+    const { field, submit } = await openCompletion();
+    expect(submit).toBeDisabled(); // empty
+    await userEvent.type(field, "   ");
+    expect(submit).toBeDisabled(); // whitespace only
+    await userEvent.type(field, "Uploaded the feed and checked the totals.  ");
+    expect(submit).toBeEnabled();
+    await userEvent.click(submit);
     expect(await screen.findByText(/Completed at .* IST \(recorded by the server\)\./)).toBeInTheDocument();
-    expect(body).toEqual({ version: 1 });
+    expect(body).toEqual({ version: 1, work_response: "Uploaded the feed and checked the totals." });
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    const panel = within(screen.getByRole("region", { name: "Work response" }));
+    expect(panel.getByText("Uploaded the feed and checked the totals.")).toBeInTheDocument();
+    expect(panel.getByText(/Submitted by Rahul Sharma/)).toBeInTheDocument();
     expect(screen.queryByLabelText(/completion (date|time)/i)).not.toBeInTheDocument();
+  });
+
+  it("shows the backend's validation error and keeps the response for another try", async () => {
+    serve(makeTask({ status: "IN_PROGRESS", allowed_actions: ["complete"] }));
+    server.use(http.post("*/api/v1/tasks/1/complete/", () => HttpResponse.json(
+      { code: "validation_error", message: "Some fields are not valid.", fields: { work_response: ["Describe the work you did before completing the task."] } },
+      { status: 400 })));
+    renderApp("/tasks/1");
+    const { dialog, field, submit } = await openCompletion();
+    await userEvent.type(field, "Done");
+    await userEvent.click(submit);
+    expect(await dialog.findByRole("alert")).toHaveTextContent("Some fields are not valid.");
+    expect(dialog.getByText("Describe the work you did before completing the task.")).toBeInTheDocument();
+    expect(field).toHaveValue("Done");
+    expect(screen.queryByText(/recorded by the server/)).not.toBeInTheDocument();
+  });
+
+  it("shows a refused completion (for example a 409) inside the dialog", async () => {
+    serve(makeTask({ status: "IN_PROGRESS", allowed_actions: ["complete"] }));
+    server.use(http.post("*/api/v1/tasks/1/complete/", () => HttpResponse.json(
+      { code: "acknowledgment_required", message: "Acknowledge the task before starting or completing it.", fields: {} },
+      { status: 409 })));
+    renderApp("/tasks/1");
+    const { dialog, field, submit } = await openCompletion();
+    await userEvent.type(field, "Done");
+    await userEvent.click(submit);
+    expect(await dialog.findByRole("alert")).toHaveTextContent("Acknowledge the task before starting or completing it.");
+  });
+
+  it("disables submission while the request is in flight", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let calls = 0;
+    serve(makeTask({ status: "IN_PROGRESS", allowed_actions: ["complete"] }));
+    server.use(http.post("*/api/v1/tasks/1/complete/", async () => {
+      calls += 1;
+      await gate;
+      return HttpResponse.json(makeTask({ status: "COMPLETED", completed_at: "2026-10-05T12:12:00Z", allowed_actions: [], work_response: RESPONSE }));
+    }));
+    renderApp("/tasks/1");
+    const { dialog, field, submit } = await openCompletion();
+    await userEvent.type(field, "Done");
+    await userEvent.click(submit);
+    const pending = await dialog.findByRole("button", { name: "Submitting…" });
+    expect(pending).toBeDisabled();
+    expect(field).toBeDisabled();
+    expect(dialog.getByRole("button", { name: "Back" })).toBeDisabled(); // its result is always seen
+    fireEvent.click(pending); // a second click while pending sends nothing
+    release();
+    expect(await screen.findByText(/Completed at .* IST/)).toBeInTheDocument();
+    expect(calls).toBe(1);
+  });
+
+  it("keeps the typed response after a version conflict reload and clears the old error", async () => {
+    let loads = 0;
+    serve(makeTask({ status: "IN_PROGRESS", allowed_actions: ["complete"] }));
+    server.use(
+      http.get("*/api/v1/tasks/1/", () => { loads += 1; return HttpResponse.json(makeTask({ status: "IN_PROGRESS", allowed_actions: ["complete"], version: loads })); }),
+      http.post("*/api/v1/tasks/1/complete/", () => HttpResponse.json(
+        { code: "version_conflict", message: "This task was changed by someone else.", fields: {} }, { status: 409 })),
+    );
+    renderApp("/tasks/1");
+    const first = await openCompletion();
+    await userEvent.type(first.field, "Checked the KYC documents.");
+    await userEvent.click(first.submit);
+    expect(await screen.findByRole("alert")).toHaveTextContent("It has been reloaded");
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    await waitFor(() => expect(loads).toBeGreaterThan(1));
+    const again = await openCompletion();
+    expect(again.field).toHaveValue("Checked the KYC documents.");
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(again.submit).toBeEnabled();
+  });
+
+  it("shows a reopened task's earlier response as a previous one", async () => {
+    serve(makeTask({ status: "IN_PROGRESS", verification_status: "REJECTED", rework_count: 1, allowed_actions: ["complete"], work_response: RESPONSE }));
+    renderApp("/tasks/1");
+    const panel = within(await screen.findByRole("region", { name: "Work response" }));
+    expect(panel.getByText(/Previous response/)).toBeInTheDocument();
+    const { field } = await openCompletion();
+    expect(field).toHaveValue(""); // a new response is required
+  });
+
+  it("shows a manager the submitted response and marks it in the comments", async () => {
+    serve(makeTask({ status: "COMPLETED", completed_at: "2026-10-05T12:12:00Z", allowed_actions: ["comment"], work_response: RESPONSE }));
+    server.use(http.get("*/api/v1/tasks/1/comments/", () => HttpResponse.json([RESPONSE])));
+    renderApp("/tasks/1");
+    const panel = within(await screen.findByRole("region", { name: "Work response" }));
+    expect(panel.getByText("Uploaded the feed and checked the totals.")).toBeInTheDocument();
+    const comments = within(screen.getByRole("region", { name: "Comments" }));
+    expect(await comments.findByText("Work response")).toBeInTheDocument();
+    expect((await actions()).queryByRole("button", { name: "Submit Response & Complete" })).not.toBeInTheDocument();
+  });
+
+  it("shows no work response panel before completion", async () => {
+    serve(makeTask({ status: "IN_PROGRESS", allowed_actions: ["complete"], work_response: null }));
+    renderApp("/tasks/1");
+    await actions();
+    expect(screen.queryByRole("region", { name: "Work response" })).not.toBeInTheDocument();
   });
 
   it("explains a 409 version conflict and reloads the task", async () => {

@@ -20,7 +20,7 @@ def completed(client_for, ops, new_task):
     task = new_task(ops["manager"], ops["rahul_emp"], verification_required=True)
     rahul = client_for(ops["rahul"])
     _act(rahul, task, "start")
-    _act(rahul, task, "complete")
+    _act(rahul, task, "complete", work_response="Work done.")
     return task
 
 
@@ -56,7 +56,7 @@ def test_rejection_sends_the_same_task_back_for_rework(client_for, ops, complete
     row = AuditLog.objects.get(action="task.verification_rejected")
     assert row.new_value["reason"] == "Wrong folio" and row.new_value["rework_count"] == 1
 
-    again = _act(rahul, completed, "complete").json()
+    again = _act(rahul, completed, "complete", work_response="Work done.").json()
     assert again["status"] == "COMPLETED" and again["verification_status"] == "PENDING"
     first = TaskVerification.objects.get(task=completed, cycle_no=1)
     assert first.rework_seconds is not None
@@ -80,7 +80,7 @@ def test_verify_only_when_pending(client_for, ops, new_task):
     task = new_task(ops["manager"], ops["rahul_emp"])  # verification not required
     rahul = client_for(ops["rahul"])
     _act(rahul, task, "start")
-    _act(rahul, task, "complete")
+    _act(rahul, task, "complete", work_response="Work done.")
     response = _act(client_for(ops["manager"]), task, "verify")
     assert response.status_code == 409 and response.json()["code"] == "invalid_state_transition"
 
@@ -97,7 +97,7 @@ def test_verification_history_is_kept_in_the_detail_view(client_for, ops, comple
     manager = client_for(ops["manager"])
     _act(manager, completed, "reject-verification", reason="r1", remarks="m1")
     rahul = client_for(ops["rahul"])
-    _act(rahul, completed, "complete")
+    _act(rahul, completed, "complete", work_response="Work done.")
     _act(manager, completed, "reject-verification", reason="r2", remarks="m2")
     detail = rahul.get(f"{TASKS}{completed.pk}/").json()
     assert [v["rejection_reason"] for v in detail["verifications"]] == ["r1", "r2"]

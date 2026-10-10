@@ -64,7 +64,9 @@ def weekly(admin_user, hr, ops, ist):
                 task.refresh_from_db()
                 task_services.start_task(actor=ops["rahul"], task=task, version=task.version)
                 task.refresh_from_db()
-                task_services.complete_task(actor=ops["rahul"], task=task, version=task.version)
+                task_services.complete_task(
+                    actor=ops["rahul"], task=task, version=task.version, work_response="Work done."
+                )
 
         def at(self, *parts):
             return time_machine.travel(ist(*parts), tick=False)

@@ -207,12 +207,13 @@ def test_completion_stops_at_server_time_met_or_missed(client_for, ops, new_task
     rahul, amit = client_for(ops["rahul"]), client_for(ops["amit"])
     with time_machine.travel(ist(2026, 10, 5, 11, 0), tick=False):
         _act(rahul, on_time, "start")
-        body = _act(rahul, on_time, "complete").json()
+        body = _act(rahul, on_time, "complete", work_response="Work done.").json()
         assert body["completed_at"] == "2026-10-05T11:00:00+05:30"
         assert body["sla"]["resolution"]["outcome"] == "MET"
     with time_machine.travel(ist(2026, 10, 5, 12, 30), tick=False):
         _act(amit, late, "start")
-        assert _act(amit, late, "complete").json()["sla"]["resolution"]["outcome"] == "MISSED"
+        late_body = _act(amit, late, "complete", work_response="Work done.").json()
+        assert late_body["sla"]["resolution"]["outcome"] == "MISSED"
     assert _clock(late).stopped_at == ist(2026, 10, 5, 12, 30)
 
 
@@ -276,9 +277,9 @@ def test_rejection_starts_no_new_resolution_clock(client_for, ops, staff, templa
     )
     rahul, manager = client_for(ops["rahul"]), client_for(ops["manager"])
     _act(rahul, task, "start")
-    _act(rahul, task, "complete")
+    _act(rahul, task, "complete", work_response="Work done.")
     _act(manager, task, "reject-verification", reason="Wrong file", remarks="Upload v2")
-    _act(rahul, task, "complete")
+    _act(rahul, task, "complete", work_response="Work done.")
     assert TaskSla.objects.filter(task=task, kind="RESOLUTION").count() == 1
 
 

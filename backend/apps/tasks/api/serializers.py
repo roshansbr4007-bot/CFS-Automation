@@ -14,6 +14,7 @@ from apps.sla.models import ClockKind, Outcome, SlaState, StopReason, Trigger
 
 from .. import monitoring, policy
 from ..models import (
+    CommentKind,
     ReceivedSource,
     Task,
     TaskAssignment,
@@ -269,6 +270,17 @@ class TaskVerificationSerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
 
+class TaskCommentSerializer(serializers.ModelSerializer):
+    author = UserRefSerializer(read_only=True)
+
+    class Meta:
+        model = TaskComment
+        # kind (additive, read-only): COMMENT, or WORK_RESPONSE for the assignee's report of the
+        # work performed, submitted with the completion.
+        fields = ["id", "author", "body", "kind", "created_at"]
+        read_only_fields = fields
+
+
 class TaskDetailSerializer(TaskSerializer):
     assignments = TaskAssignmentSerializer(many=True, read_only=True)
     verifications = TaskVerificationSerializer(many=True, read_only=True)
@@ -284,6 +296,12 @@ class TaskDetailSerializer(TaskSerializer):
     ack_arrived_overdue = serializers.SerializerMethodField(
         help_text="The acknowledgment SLA was already overdue when the task was generated."
     )
+    # Mandatory work response (additive, read-only): the latest response the assignee submitted
+    # with a completion. Null until the task is first completed (and for tasks completed before
+    # responses were required). Earlier responses of a reopened task stay in the comments.
+    work_response = serializers.SerializerMethodField(
+        help_text="The work response submitted with the latest completion, or null."
+    )
 
     class Meta(TaskSerializer.Meta):
         fields = [
@@ -293,6 +311,7 @@ class TaskDetailSerializer(TaskSerializer):
             "scheduled_at",
             "arrived_overdue",
             "ack_arrived_overdue",
+            "work_response",
         ]
         read_only_fields = fields
 
@@ -315,6 +334,16 @@ class TaskDetailSerializer(TaskSerializer):
     @extend_schema_field(serializers.BooleanField(allow_null=True))
     def get_ack_arrived_overdue(self, task) -> bool | None:
         return self._arrival(task)["ack_arrived_overdue"]
+
+    @extend_schema_field(TaskCommentSerializer(allow_null=True))
+    def get_work_response(self, task):
+        latest = (
+            task.comments.filter(kind=CommentKind.WORK_RESPONSE)
+            .select_related("author")
+            .order_by("-created_at", "-id")
+            .first()
+        )
+        return TaskCommentSerializer(latest).data if latest else None
 
 
 class TaskCreateSerializer(serializers.Serializer):
@@ -387,6 +416,21 @@ class ReasonSerializer(VersionSerializer):
     reason = serializers.CharField(allow_blank=True)
 
 
+class CompleteSerializer(VersionSerializer):
+    # REQUIRED by the business rule, but deliberately not validated at this layer: the service
+    # judges it (missing, null, blank, whitespace-only, over 5000 characters -> 400 on
+    # work_response) only AFTER the version, status, assignee and acknowledgment checks, so an
+    # invalid transition is still 409 and a non-assignee still 403, whatever the body holds.
+    work_response = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        allow_null=True,
+        default="",
+        help_text="Required: what you did (1-5000 characters after trimming). Validated after "
+        "the status and permission checks.",
+    )
+
+
 class VerifySerializer(VersionSerializer):
     remarks = serializers.CharField(required=False, allow_blank=True, default="")
 
@@ -399,15 +443,6 @@ class RejectVerificationSerializer(VersionSerializer):
 class ReassignSerializer(VersionSerializer):
     assigned_to = serializers.PrimaryKeyRelatedField(queryset=Employee.objects.all())
     note = serializers.CharField(required=False, allow_blank=True, default="")
-
-
-class TaskCommentSerializer(serializers.ModelSerializer):
-    author = UserRefSerializer(read_only=True)
-
-    class Meta:
-        model = TaskComment
-        fields = ["id", "author", "body", "created_at"]
-        read_only_fields = fields
 
 
 class CommentCreateSerializer(serializers.Serializer):

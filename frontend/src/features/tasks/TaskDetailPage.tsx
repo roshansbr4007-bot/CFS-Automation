@@ -18,12 +18,11 @@ import { SlaBadge } from "./SlaBadge";
 import { SlaPanel } from "./SlaPanel";
 import { SourceBadge } from "./SourceBadge";
 
-type Prompt = "block" | "cancel" | "verify" | "reject_verification" | "reassign";
+type Prompt = "block" | "cancel" | "verify" | "reject_verification" | "reassign" | "complete";
 
 const DIRECT: { action: TaskAction; label: string; endpoint: string }[] = [
   { action: "acknowledge", label: "Acknowledge", endpoint: "acknowledge" },
   { action: "start", label: "Start", endpoint: "start" },
-  { action: "complete", label: "Complete Task", endpoint: "complete" },
   { action: "unblock", label: "Resume", endpoint: "unblock" },
 ];
 const PROMPTED: { action: Prompt; label: string }[] = [
@@ -36,7 +35,11 @@ const PROMPTED: { action: Prompt; label: string }[] = [
 const PROMPT_TITLE: Record<Prompt, string> = {
   block: "Put task on hold", cancel: "Cancel task", verify: "Verify completion",
   reject_verification: "Reject verification", reassign: "Reassign task",
+  complete: "Submit work response",
 };
+/** Completing a task requires a work response; the backend enforces the same rules. */
+export const COMPLETE_LABEL = "Submit Response & Complete";
+export const WORK_RESPONSE_MAX = 5000;
 
 export function errorMessage(error: unknown): string | null {
   if (!(error instanceof ApiError)) return error ? "Something went wrong. Try again." : null;
@@ -84,6 +87,11 @@ export function TaskDetailPage() {
   const [remarks, setRemarks] = useState("");
   const [newAssignee, setNewAssignee] = useState("");
   const [comment, setComment] = useState("");
+  // The unsent draft belongs to one task: navigating to another task (same mounted page) starts empty.
+  const [draft, setDraft] = useState<{ taskId: number; text: string }>({ taskId: id, text: "" });
+  const workResponse = draft.taskId === id ? draft.text : "";
+  const setWorkResponse = (text: string) => setDraft({ taskId: id, text });
+  const responseLength = Array.from(workResponse.trim()).length; // code points, as the backend counts
   const [notice, setNotice] = useState<string | null>(
     (location.state as { created?: string } | null)?.created ? `Task ${(location.state as { created: string }).created} created.` : null,
   );
@@ -100,6 +108,10 @@ export function TaskDetailPage() {
     onSuccess: async (updated, { endpoint }) => {
       closePrompt();
       qc.setQueryData(["task", id], updated);
+      if (endpoint === "complete") {
+        setWorkResponse("");
+        await qc.invalidateQueries({ queryKey: ["task-comments", id] }); // the response is also a comment
+      }
       if (endpoint === "complete" && updated.completed_at) {
         setNotice(`Completed at ${formatIST(updated.completed_at)} IST (recorded by the server).`);
       }
@@ -134,10 +146,23 @@ export function TaskDetailPage() {
     if (prompt === "verify") act.mutate({ endpoint: "verify", body: { remarks } });
     if (prompt === "reject_verification") act.mutate({ endpoint: "reject-verification", body: { reason, remarks } });
     if (prompt === "reassign") act.mutate({ endpoint: "reassign", body: { assigned_to: Number(newAssignee), note: remarks } });
+    if (prompt === "complete") act.mutate({ endpoint: "complete", body: { work_response: workResponse.trim() } });
   };
   const promptReady = prompt === "block" || prompt === "cancel" ? !!reason.trim()
     : prompt === "reject_verification" ? !!reason.trim() && !!remarks.trim()
-      : prompt === "reassign" ? !!newAssignee : prompt === "verify";
+      : prompt === "reassign" ? !!newAssignee
+        : prompt === "complete" ? responseLength > 0 && responseLength <= WORK_RESPONSE_MAX
+          : prompt === "verify";
+  // The draft response is kept when the dialog closes (Back, or a reload after a version
+  // conflict) so the employee never has to retype it; it is cleared only after completion.
+  // While a request is in flight the dialog stays open, so its result (or error) is always seen.
+  const cancelPrompt = () => {
+    if (act.isPending) return;
+    if (prompt === "complete") act.reset();
+    closePrompt();
+  };
+  const completeError = prompt === "complete" ? act.error : null;
+  const workResponseErrors = completeError instanceof ApiError ? completeError.fields?.work_response : undefined;
   const onFile = (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (file) upload.mutate(file);
@@ -172,13 +197,16 @@ export function TaskDetailPage() {
       )}
 
       {notice && <Alert severity="success" onClose={() => setNotice(null)}>{notice}</Alert>}
-      {act.error && <Alert severity="warning" role="alert">{errorMessage(act.error)}</Alert>}
+      {act.error && !completeError && <Alert severity="warning" role="alert">{errorMessage(act.error)}</Alert>}
       {remove.error && <Alert severity="warning" role="alert">{errorMessage(remove.error)}</Alert>}
 
       <Stack direction="row" spacing={1} sx={{ flexWrap: "wrap", gap: 1 }} aria-label="Task actions">
         {DIRECT.filter((a) => allowed.has(a.action)).map((a) => (
           <Button key={a.action} variant="contained" disabled={act.isPending} onClick={() => act.mutate({ endpoint: a.endpoint, body: {} })}>{a.label}</Button>
         ))}
+        {allowed.has("complete") && (
+          <Button variant="contained" disabled={act.isPending} onClick={() => { act.reset(); setPrompt("complete"); }}>{COMPLETE_LABEL}</Button>
+        )}
         {PROMPTED.filter((a) => allowed.has(a.action)).map((a) => (
           <Button key={a.action} variant="outlined" disabled={act.isPending} onClick={() => setPrompt(a.action)}>{a.label}</Button>
         ))}
@@ -231,6 +259,18 @@ export function TaskDetailPage() {
         </Grid>
       </Grid>
 
+      {task.work_response && (
+        <Panel title="Work response">
+          {task.status !== "COMPLETED" && (
+            <Typography variant="body2" color="text.secondary">Previous response — the task was reopened and needs a new response to complete.</Typography>
+          )}
+          <Typography variant="caption" color="text.secondary">
+            Submitted by {task.work_response.author.full_name || task.work_response.author.email} · <DateTimeText value={task.work_response.created_at} /> IST
+          </Typography>
+          <Typography variant="body2" sx={{ whiteSpace: "pre-wrap", mt: 0.5 }}>{task.work_response.body}</Typography>
+        </Panel>
+      )}
+
       <Panel title="Verification history">
         {task.verifications.length === 0 ? <Typography variant="body2" color="text.secondary">No verification decisions yet.</Typography> : task.verifications.map((v) => (
           <Typography key={v.cycle_no} variant="body2">
@@ -247,6 +287,7 @@ export function TaskDetailPage() {
             {comments.map((c) => (
               <Box key={c.id} sx={{ mb: 1 }}>
                 <Typography variant="caption" color="text.secondary">{c.author.full_name || c.author.email} · <DateTimeText value={c.created_at} /></Typography>
+                {c.kind === "WORK_RESPONSE" && <Chip size="small" variant="outlined" color="primary" label="Work response" sx={{ ml: 1, height: 18 }} />}
                 <Typography variant="body2" sx={{ whiteSpace: "pre-wrap" }}>{c.body}</Typography>
               </Box>
             ))}
@@ -289,9 +330,28 @@ export function TaskDetailPage() {
         </DialogActions>
       </Dialog>
 
-      <Dialog open={prompt !== null} onClose={closePrompt} fullWidth maxWidth="xs" aria-labelledby="task-prompt-title">
+      <Dialog open={prompt !== null} onClose={cancelPrompt} fullWidth maxWidth={prompt === "complete" ? "sm" : "xs"} aria-labelledby="task-prompt-title">
         <DialogTitle id="task-prompt-title">{prompt ? PROMPT_TITLE[prompt] : ""}</DialogTitle>
         <DialogContent sx={{ display: "grid", gap: 2, pt: "8px !important" }}>
+          {prompt === "complete" && (
+            <>
+              <Typography variant="body2" color="text.secondary">
+                Describe the work you did. It is saved with the completion, the task is completed immediately
+                (no approval step), and your manager can read it in the task history. It cannot be edited afterwards.
+              </Typography>
+              {completeError && (
+                <Alert severity="error" role="alert">
+                  {workResponseErrors ? completeError.message : errorMessage(completeError)}
+                </Alert>
+              )}
+              <TextField
+                label="Work performed" value={workResponse} onChange={(e) => setWorkResponse(e.target.value)}
+                required multiline minRows={4} autoFocus disabled={act.isPending}
+                error={!!workResponseErrors || responseLength > WORK_RESPONSE_MAX}
+                helperText={workResponseErrors?.join(" ") ?? `${responseLength} / ${WORK_RESPONSE_MAX} characters`}
+              />
+            </>
+          )}
           {prompt === "reassign" && (
             <TextField select label="New assignee" value={newAssignee} onChange={(e) => setNewAssignee(e.target.value)}>
               {assignees.filter((a) => a.id !== task.assigned_to.id).map((a) => <MenuItem key={a.id} value={a.id}>{a.full_name} ({a.department.code})</MenuItem>)}
@@ -305,8 +365,10 @@ export function TaskDetailPage() {
           )}
         </DialogContent>
         <DialogActions>
-          <Button onClick={closePrompt}>Back</Button>
-          <Button variant="contained" disabled={!promptReady || act.isPending} onClick={submitPrompt}>Confirm</Button>
+          <Button onClick={cancelPrompt} disabled={act.isPending}>Back</Button>
+          <Button variant="contained" disabled={!promptReady || act.isPending} onClick={submitPrompt}>
+            {prompt === "complete" ? (act.isPending ? "Submitting…" : "Submit & complete") : "Confirm"}
+          </Button>
         </DialogActions>
       </Dialog>
     </Stack>

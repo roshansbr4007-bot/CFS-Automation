@@ -7,7 +7,10 @@ import { useEffect, useState } from "react";
 
 import { ApiError } from "../../api/apiClient";
 import { departmentsApi, employeesApi, responsibilitiesApi, tasksApi } from "../../api/endpoints";
-import { PERM, TASK_PRIORITIES, type Responsibility, type TaskPriority } from "../../api/types";
+import {
+  PERM, TASK_PRIORITIES, type OwnerAssignmentResult, type Responsibility, type ResponsibilitySetupResult, type TaskPriority,
+  type TodayGeneration,
+} from "../../api/types";
 import { useAuth } from "../../app/AuthProvider";
 import { ApiErrorAlert } from "../../components/ApiErrorAlert";
 import { DataTable, type Column } from "../../components/DataTable";
@@ -44,6 +47,7 @@ export function ResponsibilitiesPage() {
   const [history, setHistory] = useState<Responsibility | null>(null);
   const [scheduling, setScheduling] = useState<Responsibility | null>(null);
   const [archiving, setArchiving] = useState<Responsibility | null>(null);
+  const [ownerNotice, setOwnerNotice] = useState<Notice | null>(null);
 
   const columns: Column<Responsibility>[] = [
     { key: "name", header: "Responsibility", render: (r) => <Stack><strong>{r.name}</strong><Typography variant="caption" color="text.secondary">{r.code}</Typography></Stack> },
@@ -60,7 +64,7 @@ export function ResponsibilitiesPage() {
       <Stack direction="row" spacing={1}>
         {/* Change Set 1 (D6): an archived responsibility no longer changes (no reactivation here). */}
         {r.is_active && r.can_manage && <Button size="small" onClick={() => setEditing(r)}>Edit</Button>}
-        {r.is_active && r.can_manage && <Button size="small" onClick={() => setOwning(r)}>Change owner</Button>}
+        {r.is_active && r.can_manage_owner && <Button size="small" onClick={() => setOwning(r)}>Change owner</Button>}
         {r.is_active && r.can_manage && <Button size="small" onClick={() => setScheduling(r)}>Add schedule</Button>}
         {r.is_active && r.can_manage && <Button size="small" color="warning" onClick={() => setArchiving(r)}>Deactivate</Button>}
         <Button size="small" onClick={() => setHistory(r)}>History</Button>
@@ -78,10 +82,11 @@ export function ResponsibilitiesPage() {
         Regular duties generate their tasks automatically. The owner on each business date receives that day's task.
       </Typography>
       <ApiErrorAlert error={error} />
+      {ownerNotice && <Alert severity={ownerNotice.severity} onClose={() => setOwnerNotice(null)}>{ownerNotice.text}</Alert>}
       <DataTable caption="Responsibilities" columns={columns} rows={data} getRowId={(r) => r.id} loading={isFetching}
         total={data.length} page={0} onPageChange={() => undefined} emptyMessage="No responsibilities yet." />
-      <ResponsibilityDialog value={editing} onClose={() => setEditing(null)} />
-      <OwnerDialog responsibility={owning} onClose={() => setOwning(null)} />
+      <ResponsibilityDialog value={editing} onClose={() => setEditing(null)} onCreated={(result) => setOwnerNotice(setupOutcome(result))} />
+      <OwnerDialog responsibility={owning} onClose={() => setOwning(null)} onAssigned={(result) => setOwnerNotice(ownerOutcome(result))} />
       <DeactivateDialog responsibility={archiving} onClose={() => setArchiving(null)} />
       <HistoryDialog responsibility={history} onClose={() => setHistory(null)} />
       <AddScheduleDialog responsibility={scheduling} onClose={() => setScheduling(null)} />
@@ -91,7 +96,9 @@ export function ResponsibilitiesPage() {
 
 /** Add = Phase A setup (responsibility + optional owner + first schedule, saved together).
  * Edit = the existing responsibility fields (schedules and owners have their own actions). */
-function ResponsibilityDialog({ value, onClose }: { value: Responsibility | "new" | null; onClose: () => void }) {
+function ResponsibilityDialog({ value, onClose, onCreated }: {
+  value: Responsibility | "new" | null; onClose: () => void; onCreated: (result: ResponsibilitySetupResult) => void;
+}) {
   const qc = useQueryClient();
   const { hasPerm } = useAuth();
   const allowPast = hasPerm(PERM.manageSchedules);
@@ -100,12 +107,15 @@ function ResponsibilityDialog({ value, onClose }: { value: Responsibility | "new
   const { data: departments = [] } = useQuery({ queryKey: ["departments"], queryFn: departmentsApi.list, enabled: open });
   const { data: categories = [] } = useQuery({ queryKey: ["task-categories"], queryFn: tasksApi.categories, enabled: open });
   const { data: templates = [] } = useQuery({ queryKey: ["task-templates"], queryFn: tasksApi.templates, enabled: open });
-  const { data: people } = useQuery({
-    queryKey: ["employees", { page: 1, is_active: true }], queryFn: () => employeesApi.list({ page: 1, is_active: true }),
-    enabled: open && !existing,
-  });
   const [code, setCode] = useState(""); const [name, setName] = useState(""); const [description, setDescription] = useState("");
   const [department, setDepartment] = useState(""); const [category, setCategory] = useState("");
+  // Locked rules A/B: only HR / Admin set an owner, and only from the responsibility's department.
+  const canOwner = hasPerm(PERM.manageAllResponsibilities);
+  const { data: people } = useQuery({
+    queryKey: ["employees", { page: 1, is_active: true, department }],
+    queryFn: () => employeesApi.list({ page: 1, is_active: true, department }),
+    enabled: open && !existing && canOwner && !!department,
+  });
   const [priority, setPriority] = useState<TaskPriority>("MEDIUM");
   const [template, setTemplate] = useState("");
   const [owner, setOwner] = useState(""); const [ownerFrom, setOwnerFrom] = useState(todayIST());
@@ -140,10 +150,13 @@ function ResponsibilityDialog({ value, onClose }: { value: Responsibility | "new
         owner: owner ? { employee: Number(owner), effective_from: ownerFrom } : null,
         schedule: toScheduleInput(schedule), ...deadlinePayload,
       }),
-    onSuccess: async () => {
+    onSuccess: async (result) => {
+      if (!existing) onCreated(result as ResponsibilitySetupResult);
       await Promise.all([
         qc.invalidateQueries({ queryKey: ["responsibilities"] }),
         qc.invalidateQueries({ queryKey: ["recurring-schedules"] }),
+        qc.invalidateQueries({ queryKey: ["tasks"] }),
+        qc.invalidateQueries({ queryKey: ["daily-activities"] }),
       ]);
       onClose();
     },
@@ -173,7 +186,7 @@ function ResponsibilityDialog({ value, onClose }: { value: Responsibility | "new
           error={!!fieldError.code} helperText={fieldError.code} />
         <TextField size="small" label="Name" value={name} onChange={(e) => setName(e.target.value)} error={!!fieldError.name} helperText={fieldError.name} />
         <TextField size="small" label="Description / instructions" value={description} onChange={(e) => setDescription(e.target.value)} multiline minRows={1} />
-        <TextField size="small" select label="Department" value={department} onChange={(e) => { setDepartment(String(e.target.value)); setTemplate(""); }}
+        <TextField size="small" select label="Department" value={department} onChange={(e) => { setDepartment(String(e.target.value)); setTemplate(""); setOwner(""); }}
           disabled={!!existing} error={!!fieldError.department} helperText={fieldError.department}>
           {departments.map((d) => <MenuItem key={d.id} value={String(d.id)}>{d.code} — {d.name}</MenuItem>)}
         </TextField>
@@ -206,9 +219,13 @@ function ResponsibilityDialog({ value, onClose }: { value: Responsibility | "new
         {!existing && (
           <>
             <Typography variant="subtitle2" component="h3">Owner (optional)</Typography>
+            {!canOwner ? (
+              <Typography variant="caption" color="text.secondary">Only HR or Admin can assign the owner.</Typography>
+            ) : (
             <Stack direction="row" spacing={2}>
               <TextField size="small" select label="Owner" value={owner} onChange={(e) => setOwner(String(e.target.value))} sx={{ flex: 1 }}
-                error={!!ownerErrors.employee} helperText={ownerErrors.employee}>
+                disabled={!department}
+                error={!!ownerErrors.employee} helperText={ownerErrors.employee ?? (department ? "Employees of the chosen department." : "Choose the department first.")}>
                 <MenuItem value="">No owner yet</MenuItem>
                 {(people?.results ?? []).map((p) => <MenuItem key={p.id} value={String(p.id)}>{p.full_name} ({p.department.code})</MenuItem>)}
               </TextField>
@@ -216,6 +233,7 @@ function ResponsibilityDialog({ value, onClose }: { value: Responsibility | "new
                 InputLabelProps={{ shrink: true }} inputProps={{ min: todayIST() }} disabled={!owner}
                 error={!!(ownerFromProblem ?? ownerErrors.effective_from)} helperText={ownerFromProblem ?? ownerErrors.effective_from} />
             </Stack>
+            )}
             <Typography variant="subtitle2" component="h3">Schedule</Typography>
             <ScheduleFields value={schedule} onChange={setSchedule} errors={scheduleErrors} allowPast={allowPast} />
           </>
@@ -269,19 +287,67 @@ function DeactivateDialog({ responsibility, onClose }: { responsibility: Respons
   );
 }
 
-function OwnerDialog({ responsibility, onClose }: { responsibility: Responsibility | null; onClose: () => void }) {
+type Notice = { severity: "success" | "warning"; text: string };
+
+const NOT_GENERATED: Partial<Record<TodayGeneration["result"], string>> = {
+  skipped: "was skipped", missed: "was missed", failed: "could not be generated",
+};
+
+/** Today's generation outcome in words, exactly as the server reported it (never assumed). */
+function generationParts(outcomes: TodayGeneration[]): { parts: string[]; warn: boolean } {
+  const parts: string[] = [];
+  let warn = false;
+  if (outcomes.some((g) => g.result === "generated" || g.result === "recovered")) parts.push("Today's task was generated for them now.");
+  for (const g of outcomes) {
+    const what = NOT_GENERATED[g.result];
+    if (what) {
+      warn = true;
+      parts.push(`Today's task ${what}${g.detail ? `: ${g.detail}` : "."} See the schedule's occurrences.`);
+    }
+  }
+  return { parts, warn };
+}
+
+export function ownerOutcome(result: OwnerAssignmentResult): Notice {
+  const parts = [`${result.employee.full_name} is the owner from ${formatBusinessDate(result.effective_from)}.`];
+  const moved = result.transferred_tasks ?? [];
+  if (moved.length === 1) parts.push(`Today's open task ${moved[0].reference} moved to them, keeping its deadline and history.`);
+  if (moved.length > 1) parts.push(`Today's open tasks ${moved.map((t) => t.reference).join(", ")} moved to them, keeping their deadlines and history.`);
+  const generation = generationParts(result.today_generation ?? []);
+  return { severity: generation.warn ? "warning" : "success", text: [...parts, ...generation.parts].join(" ") };
+}
+
+export function setupOutcome(result: ResponsibilitySetupResult): Notice | null {
+  const generation = generationParts(result.today_generation ?? []);
+  if (generation.parts.length === 0) return null;
+  return { severity: generation.warn ? "warning" : "success", text: [`${result.name} was set up.`, ...generation.parts].join(" ") };
+}
+
+function OwnerDialog({ responsibility, onClose, onAssigned }: {
+  responsibility: Responsibility | null; onClose: () => void; onAssigned: (result: OwnerAssignmentResult) => void;
+}) {
   const qc = useQueryClient();
   const open = responsibility !== null;
+  const department = responsibility?.department.id;
   const { data: people } = useQuery({
-    queryKey: ["employees", { page: 1, is_active: true }], queryFn: () => employeesApi.list({ page: 1, is_active: true }), enabled: open,
+    queryKey: ["employees", { page: 1, is_active: true, department }],
+    queryFn: () => employeesApi.list({ page: 1, is_active: true, department }), enabled: open,
   });
   const [employee, setEmployee] = useState(""); const [from, setFrom] = useState(""); const [note, setNote] = useState("");
   const [lastDay, setLastDay] = useState("");
   useEffect(() => { if (open) { setEmployee(""); setFrom(""); setNote(""); setLastDay(""); } }, [open]);
-  const done = async () => { await qc.invalidateQueries({ queryKey: ["responsibilities"] }); onClose(); };
+  const done = async () => {
+    await Promise.all([
+      qc.invalidateQueries({ queryKey: ["responsibilities"] }),
+      // Today's task may have moved or been generated.
+      qc.invalidateQueries({ queryKey: ["tasks"] }),
+      qc.invalidateQueries({ queryKey: ["daily-activities"] }),
+    ]);
+    onClose();
+  };
   const assign = useMutation({
     mutationFn: () => responsibilitiesApi.assignOwner((responsibility as Responsibility).id, { employee: Number(employee), effective_from: from, note }),
-    onSuccess: done,
+    onSuccess: async (result) => { onAssigned(result); await done(); },
   });
   const end = useMutation({
     mutationFn: () => responsibilitiesApi.endOwnership((responsibility as Responsibility).id, { last_day: lastDay, note }),
@@ -295,7 +361,8 @@ function OwnerDialog({ responsibility, onClose }: { responsibility: Responsibili
         {apiError && <Alert severity="error">{apiError.message}</Alert>}
         <Typography variant="body2">
           Current owner: {responsibility?.current_owner ? responsibility.current_owner.employee.full_name : "nobody"}.
-          Tasks already generated keep their assignee.
+          The owner must be from {responsibility?.department.code}. If the new owner starts today, today's open task moves to them with its
+          deadline and history; completed tasks and other days stay as they are.
         </Typography>
         <TextField size="small" select label="New owner" value={employee} onChange={(e) => setEmployee(String(e.target.value))}>
           {(people?.results ?? []).map((p) => <MenuItem key={p.id} value={String(p.id)}>{p.full_name} ({p.department.code})</MenuItem>)}

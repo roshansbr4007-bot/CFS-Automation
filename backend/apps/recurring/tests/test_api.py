@@ -83,9 +83,12 @@ def test_edit_activate_deactivate_with_versions_and_audit(admin_client, ops, cli
 # --- ownership --------------------------------------------------------------------------------
 
 
-def test_ownership_assign_change_history_and_end(client_for, ops, ist):
+def test_ownership_assign_change_history_and_end(client_for, make_user, ops, ist):
+    """Locked rule A (owner change): HR / Admin assign, change and end owners; the Operations
+    Manager (formerly allowed here) still reads them. Every other expectation is unchanged."""
     feed = Responsibility.objects.get(code="FEED_UPLOAD")
-    manager = client_for(ops["manager"])
+    manager = client_for(make_user(roles.HR))  # the owner-changing actor (was the Ops Manager)
+    reader = client_for(ops["manager"])
     url = f"{RESP}{feed.pk}/owners/"
     with time_machine.travel(ist(2026, 10, 1, 9, 0), tick=False):
         first = manager.post(url, {"employee": ops["rahul_emp"].pk, "effective_from": "2026-10-01"})
@@ -102,9 +105,9 @@ def test_ownership_assign_change_history_and_end(client_for, ops, ist):
         handover = {"employee": ops["amit_emp"].pk, "effective_from": "2026-10-10", "note": "Rota"}
         change = manager.post(url, handover)
         assert change.status_code == 201
-        detail = manager.get(f"{RESP}{feed.pk}/").json()
+        detail = reader.get(f"{RESP}{feed.pk}/").json()
         assert detail["current_owner"]["employee"]["id"] == ops["rahul_emp"].pk  # until 9 Oct
-    history = manager.get(url).json()
+    history = reader.get(url).json()
     assert [(h["employee"]["id"], h["effective_from"], h["effective_to"]) for h in history] == [
         (ops["rahul_emp"].pk, "2026-10-01", "2026-10-09"),
         (ops["amit_emp"].pk, "2026-10-10", None),
@@ -122,9 +125,9 @@ def test_ownership_assign_change_history_and_end(client_for, ops, ist):
     assert AuditLog.objects.filter(action="responsibility.owner_assigned").count() == 1
 
 
-def test_end_ownership_cannot_precede_the_start(client_for, ops, ist):
+def test_end_ownership_cannot_precede_the_start(client_for, make_user, ops, ist):
     feed = Responsibility.objects.get(code="FEED_UPLOAD")
-    manager = client_for(ops["manager"])
+    manager = client_for(make_user(roles.HR))  # locked rule A: HR / Admin end ownership
     with time_machine.travel(ist(2026, 10, 1, 9, 0), tick=False):
         future = {"employee": ops["rahul_emp"].pk, "effective_from": "2026-10-08"}
         manager.post(f"{RESP}{feed.pk}/owners/", future)

@@ -23,6 +23,12 @@ Approved recovery rules:
   is recovered on its existing ledger row; earlier days and other skip reasons are not.
 Manager login plays no part in any of this.
 
+Owner changes (locked rule D): when HR / Admin assigns an owner who starts today,
+generate_today() runs this same generation at once for that responsibility, for TODAY only
+(earlier dates stay with the per-minute run and its catch-up rules). Each occurrence resolves its
+owner while holding the responsibility row lock that an owner change also takes, so a task is
+never created for an owner who was replaced in the same instant.
+
 Arrival facts (approved S5-S7): the recurring.task_generated audit entry of every generated task
 also records its scheduled time, when it arrived, whether its resolution and acknowledgment clocks
 were already overdue on arrival, and the task type's own trigger. Written once, in the same
@@ -44,7 +50,13 @@ from apps.notifications.services import notify_schedule_warning
 from apps.sla import services as sla
 from apps.tasks.services import create_scheduled_task
 
-from .models import Frequency, OccurrenceStatus, RecurringSchedule, ScheduleOccurrence
+from .models import (
+    Frequency,
+    OccurrenceStatus,
+    RecurringSchedule,
+    Responsibility,
+    ScheduleOccurrence,
+)
 from .services import NO_OWNER_REASON, resolve_owner
 
 logger = logging.getLogger(__name__)
@@ -194,11 +206,21 @@ def _record_missed(schedule, day: date, scheduler) -> str:
     return "missed"
 
 
+def _owner_locked(schedule, day: date):
+    """resolve_owner() under the responsibility row lock (taken by assign_owner too)."""
+    list(
+        Responsibility.objects.select_for_update()
+        .filter(pk=schedule.responsibility_id)
+        .values_list("pk", flat=True)
+    )
+    return resolve_owner(schedule.responsibility, day)
+
+
 def _generate(schedule, day: date, now: datetime, scheduler) -> str:
-    owner, reason = resolve_owner(schedule.responsibility, day)
     scheduled_at = ist_datetime(day, schedule.run_time)
     delay_seconds = max(0, int((now - scheduled_at).total_seconds()))
     with transaction.atomic():
+        owner, reason = _owner_locked(schedule, day)
         if owner is None:
             occurrence = _claim(schedule, day, OccurrenceStatus.SKIPPED, detail=reason)
             if occurrence is None:
@@ -250,10 +272,10 @@ def _recover_skipped(occurrence, now: datetime, scheduler) -> bool:
     if day != to_ist(now).date():
         return False  # only the current business date is ever recovered
     schedule = occurrence.schedule
-    owner, _ = resolve_owner(schedule.responsibility, day)
-    if owner is None:
-        return False  # still nobody: stays SKIPPED
     with transaction.atomic():
+        owner, _ = _owner_locked(schedule, day)
+        if owner is None:
+            return False  # still nobody: stays SKIPPED
         row = ScheduleOccurrence.objects.select_for_update().get(pk=occurrence.pk)
         if row.status != OccurrenceStatus.SKIPPED or row.detail != NO_OWNER_REASON:
             return False  # another run recovered it first
@@ -307,13 +329,8 @@ def _record_failure(schedule, day: date, scheduler, error: Exception) -> str:
     return "failed"
 
 
-def generate_due_occurrences(now: datetime | None = None) -> dict:
-    """One pass of the generator. Safe to run any number of times."""
-    now = now or timezone.now()
-    today = to_ist(now).date()
-    scheduler = scheduler_user()
-    summary = {"generated": 0, "skipped": 0, "missed": 0, "failed": 0, "existing": 0}
-    schedules = (
+def _active_schedules(today: date):
+    return (
         RecurringSchedule.objects.filter(
             is_active=True, responsibility__is_active=True, effective_from__lte=today
         )
@@ -321,7 +338,77 @@ def generate_due_occurrences(now: datetime | None = None) -> dict:
         .select_related("responsibility")
         .order_by("id")
     )
+
+
+NOT_DUE = "not_due"  # today's run time has not come, or the schedule has no occurrence today
+
+
+def _today_row_result(schedule, today: date, now: datetime, scheduler) -> tuple[str, str | None]:
+    """(result, detail) for a schedule whose today's occurrence is already in the ledger."""
+    row = schedule.occurrences.filter(occurrence_date=today).first()
+    if row is None:
+        return NOT_DUE, None
+    if row.status == OccurrenceStatus.SKIPPED and row.detail == NO_OWNER_REASON:
+        if _recover_skipped(row, now, scheduler):
+            return "recovered", None
+        row.refresh_from_db()
+    if row.status == OccurrenceStatus.GENERATED and row.task_id is not None:
+        return "existing", None
+    # Not recovered by the existing rules (e.g. skipped because its owner was inactive, failed
+    # earlier, or its task was deleted): reported as it is, never as an existing task.
+    return row.status.lower(), row.detail or None
+
+
+def generate_today(responsibility, now: datetime | None = None) -> list[dict]:
+    """Locked rule D: generate (or recover) TODAY's due occurrences of one responsibility at once,
+    through the same _generate / _recover_skipped as the per-minute run (same eligibility,
+    working-day, idempotency and S1 clock rules). Dates before today are left to the per-minute
+    run. Never raises: each schedule's outcome is returned as it happened, and a generation
+    failure is recorded as FAILED exactly as the per-minute run records it.
+    [{schedule_id, occurrence_date, result, detail}]; result is generated, recovered, existing
+    (a task exists), skipped / missed / failed (today's ledger row, with its detail) or not_due."""
+    now = now or timezone.now()
+    today = to_ist(now).date()
+    results = []
+    try:
+        scheduler = scheduler_user()
+        schedules = list(_active_schedules(today).filter(responsibility_id=responsibility.pk))
+    except Exception:  # e.g. the scheduler account is missing: nothing was written
+        logger.exception("Immediate generation for responsibility %s failed", responsibility.pk)
+        return [{"schedule_id": None, "occurrence_date": today, "result": "failed",
+                 "detail": "Immediate generation could not start; see the server log."}]
     for schedule in schedules:
+        detail = None
+        try:
+            if (today, True) in due_occurrences(schedule, now):
+                try:
+                    result = _generate(schedule, today, now, scheduler)
+                except Exception as error:  # recorded, audited and reported; never lost
+                    logger.exception("Generating %s for %s failed", schedule, today)
+                    result = _record_failure(schedule, today, scheduler, error)
+                if result == "failed":
+                    detail = schedule.occurrences.filter(occurrence_date=today).values_list(
+                        "detail", flat=True
+                    ).first()
+                elif result == "skipped":
+                    detail = NO_OWNER_REASON
+            else:
+                result, detail = _today_row_result(schedule, today, now, scheduler)
+        except Exception:  # never turn a committed owner change into an error response
+            logger.exception("Immediate generation of %s for %s failed", schedule, today)
+            result, detail = "failed", "Immediate generation failed; see the server log."
+        results.append({"schedule_id": schedule.pk, "occurrence_date": today, "result": result,
+                        "detail": detail})
+    return results
+
+
+def generate_due_occurrences(now: datetime | None = None) -> dict:
+    """One pass of the generator. Safe to run any number of times."""
+    now = now or timezone.now()
+    today = to_ist(now).date()
+    scheduler = scheduler_user()
+    summary = {"generated": 0, "skipped": 0, "missed": 0, "failed": 0, "existing": 0}
+    for schedule in _active_schedules(today):
         for day, generate in due_occurrences(schedule, now):
             if not generate:
                 summary[_record_missed(schedule, day, scheduler)] += 1

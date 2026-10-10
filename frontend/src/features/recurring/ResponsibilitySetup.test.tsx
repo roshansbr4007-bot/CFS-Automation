@@ -71,9 +71,10 @@ async function fillBasics(dialog: HTMLElement) {
 }
 
 describe("Responsibility setup (Phase A)", () => {
+  // Locked rule A: HR / Admin set the owner (this flow was the Operations Manager's before).
   it("creates responsibility, owner and schedule in one request", async () => {
     const posts: { url: string; body: unknown }[] = [];
-    server.use(signedInAs("Operations Manager"), ...lookups([], posts));
+    server.use(signedInAs("HR"), ...lookups([], posts));
     renderApp("/responsibilities");
     const dialog = await openSetup();
     await fillBasics(dialog);
@@ -121,6 +122,57 @@ describe("Responsibility setup (Phase A)", () => {
     expect(await within(dialog).findByText("Enter a valid time.")).toBeInTheDocument();
     expect(within(dialog).getByText("Some fields are not valid.")).toBeInTheDocument();
     expect(screen.getByRole("dialog", { name: "Add responsibility" })).toBeInTheDocument(); // still open
+  });
+});
+
+describe("Responsibility setup: owner rules", () => {
+  it("offers an Operations Manager no owner, and still sets up the rest", async () => {
+    const posts: { url: string; body: unknown }[] = [];
+    server.use(signedInAs("Operations Manager"), ...lookups([], posts));
+    renderApp("/responsibilities");
+    const dialog = await openSetup();
+    expect(within(dialog).getByText("Only HR or Admin can assign the owner.")).toBeInTheDocument();
+    expect(within(dialog).queryByRole("combobox", { name: "Owner" })).not.toBeInTheDocument();
+    await fillBasics(dialog);
+    fireEvent.change(within(dialog).getByLabelText("Time (IST)"), { target: { value: "10:00" } });
+    await userEvent.click(within(dialog).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(posts).toHaveLength(1));
+    expect((posts[0].body as { owner: unknown }).owner).toBeNull();
+  });
+
+  it("lists owners of the chosen department only", async () => {
+    const seen: URL[] = [];
+    server.use(signedInAs("Admin"), ...lookups([], []));
+    server.use(  // a later server.use() takes priority over the shared employees handler
+      http.get("*/api/v1/employees/", ({ request }) => {
+        seen.push(new URL(request.url));
+        return HttpResponse.json({ count: 1, next: null, previous: null, results: [RAHUL] });
+      }));
+    renderApp("/responsibilities");
+    const dialog = await openSetup();
+    expect(within(dialog).getByText("Choose the department first.")).toBeInTheDocument();
+    await choose(dialog, "Department", "OPS — Operations");
+    await choose(dialog, "Owner", "Rahul Sharma (OPS)");
+    expect(seen.length).toBeGreaterThan(0);
+    expect(seen.every((u) => u.searchParams.get("department") === "1")).toBe(true);
+  });
+});
+
+describe("Responsibility setup: today's generation", () => {
+  it("reports a late setup's generated task for today", async () => {
+    const posts: { url: string; body: unknown }[] = [];
+    server.use(signedInAs("HR"), ...lookups([], posts, () => HttpResponse.json(
+      { ...responsibility({ id: 99, name: "Birthday wish" }),
+        today_generation: [{ schedule_id: 7, occurrence_date: "2026-10-05", result: "generated", detail: null }] },
+      { status: 201 },
+    )));
+    renderApp("/responsibilities");
+    const dialog = await openSetup();
+    await fillBasics(dialog);
+    await choose(dialog, "Owner", "Rahul Sharma (OPS)");
+    fireEvent.change(within(dialog).getByLabelText("Time (IST)"), { target: { value: "10:00" } });
+    await userEvent.click(within(dialog).getByRole("button", { name: "Save" }));
+    expect(await screen.findByText("Birthday wish was set up. Today's task was generated for them now.")).toBeInTheDocument();
   });
 });
 

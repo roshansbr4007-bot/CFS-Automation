@@ -30,7 +30,8 @@ describe("Task detail", () => {
     expect(bar.getByRole("button", { name: "Start" })).toBeInTheDocument();
     expect(bar.getByRole("button", { name: "Put on hold" })).toBeInTheDocument();
     expect(bar.getByRole("button", { name: "Cancel task" })).toBeInTheDocument();
-    expect(bar.queryByRole("button", { name: "Complete" })).not.toBeInTheDocument();
+    expect(bar.queryByRole("button", { name: "Submit Response & Complete" })).not.toBeInTheDocument();
+    expect(bar.queryByRole("button", { name: /^Complete/ })).not.toBeInTheDocument();
     expect(screen.getByText("Deadlines and SLA tracking arrive in a later phase.")).toBeInTheDocument();
   });
 
@@ -81,6 +82,47 @@ describe("Task detail", () => {
     await userEvent.type(screen.getByLabelText(/Remarks/), "Use folio 1234");
     await userEvent.click(confirm);
     await waitFor(() => expect(body).toEqual({ version: 1, reason: "Wrong folio", remarks: "Use folio 1234" }));
+  });
+
+  it("requires a work response before completing and shows it afterwards", async () => {
+    let body: Record<string, unknown> | null = null;
+    const response = { id: 9, author: { id: 3, email: "rahul@example.com", full_name: "Rahul Sharma" }, body: "Mapped the RM codes.", kind: "WORK_RESPONSE" as const, created_at: "2026-10-05T06:00:00Z" };
+    let current = makeTask({ status: "IN_PROGRESS", allowed_actions: ["complete"] });
+    server.use(
+      http.get("*/api/v1/tasks/1/", () => HttpResponse.json(current)),
+      http.get("*/api/v1/tasks/1/comments/", () => HttpResponse.json([])),
+      http.get("*/api/v1/tasks/1/attachments/", () => HttpResponse.json([])),
+      http.post("*/api/v1/tasks/1/complete/", async ({ request }) => {
+        body = (await request.json()) as Record<string, unknown>;
+        current = makeTask({ status: "COMPLETED", completed_at: "2026-10-05T06:00:00Z", allowed_actions: [], work_response: response });
+        return HttpResponse.json(current);
+      }),
+    );
+    renderWithProviders(<TaskDetailDialog taskId={1} onClose={() => {}} />);
+    await userEvent.click((await actions()).getByRole("button", { name: "Submit Response & Complete" }));
+    const submit = screen.getByRole("button", { name: "Submit & complete" });
+    expect(submit).toBeDisabled();
+    await userEvent.type(screen.getByLabelText(/Work performed/), "  ");
+    expect(submit).toBeDisabled();
+    await userEvent.type(screen.getByLabelText(/Work performed/), "Mapped the RM codes. ");
+    await userEvent.click(submit);
+    await waitFor(() => expect(body).toEqual({ version: 1, work_response: "Mapped the RM codes." }));
+    const section = within(await screen.findByRole("region", { name: "Work response" }));
+    expect(section.getByText("Mapped the RM codes.")).toBeInTheDocument();
+  });
+
+  it("shows the backend's validation error for the work response", async () => {
+    serve(makeTask({ status: "IN_PROGRESS", allowed_actions: ["complete"] }));
+    server.use(http.post("*/api/v1/tasks/1/complete/", () => HttpResponse.json(
+      { code: "validation_error", message: "Some fields are not valid.", fields: { work_response: ["Describe the work you did before completing the task."] } },
+      { status: 400 })));
+    renderWithProviders(<TaskDetailDialog taskId={1} onClose={() => {}} />);
+    await userEvent.click((await actions()).getByRole("button", { name: "Submit Response & Complete" }));
+    await userEvent.type(screen.getByLabelText(/Work performed/), "Done");
+    await userEvent.click(screen.getByRole("button", { name: "Submit & complete" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Some fields are not valid.");
+    expect(screen.getByText("Describe the work you did before completing the task.")).toBeInTheDocument();
+    expect(screen.getByLabelText(/Work performed/)).toHaveValue("Done");
   });
 
   it("shows verification history", async () => {

@@ -258,7 +258,8 @@ def test_rejected_verification_reopens_the_task(admin_user, hr, ops, work, sla_2
                                title="Rejected, redone in time", verification_required=True)
     work.complete(redone, rahul, 2026, 11, 4, 11, 0)
     _reject(redone, manager, ist, 2026, 11, 4, 12, 0)
-    _act(task_services.complete_task, redone, rahul, ist, 2026, 11, 4, 16, 0)
+    _act(task_services.complete_task, redone, rahul, ist, 2026, 11, 4, 16, 0,
+         work_response="Work done.")
     rejected_late = _raise_verifiable(new_task, manager, emp, ist, 2026, 11, 6, 10, 0,
                                       title="Rejected after month end",
                                       verification_required=True)
@@ -311,14 +312,16 @@ def test_verification_required_uses_the_accepted_completion(admin_user, hr, ops,
     rework_late = raise_kyc(4, "V2 rework after the deadline")  # due 5 Nov 10:00
     work.complete(rework_late, rahul, 2026, 11, 4, 12, 0)  # first submission on time
     _reject(rework_late, manager, ist, 2026, 11, 4, 13, 0)
-    _act(task_services.complete_task, rework_late, rahul, ist, 2026, 11, 6, 10, 0)
+    _act(task_services.complete_task, rework_late, rahul, ist, 2026, 11, 6, 10, 0,
+         work_response="Work done.")
     _act(task_services.verify_task, rework_late, manager, ist, 2026, 11, 6, 11, 0)
     pending = raise_kyc(9, "V3 never verified")  # due 10 Nov 10:00
     work.complete(pending, rahul, 2026, 11, 9, 12, 0)
     rework_ok = raise_kyc(16, "V4 rework in time")
     work.complete(rework_ok, rahul, 2026, 11, 16, 11, 0)
     _reject(rework_ok, manager, ist, 2026, 11, 16, 12, 0)
-    _act(task_services.complete_task, rework_ok, rahul, ist, 2026, 11, 16, 14, 0)
+    _act(task_services.complete_task, rework_ok, rahul, ist, 2026, 11, 16, 14, 0,
+         work_response="Work done.")
     _act(task_services.verify_task, rework_ok, manager, ist, 2026, 11, 16, 15, 0)
 
     clock = TaskSla.objects.get(task=rework_late, kind=ClockKind.RESOLUTION)

@@ -11,6 +11,8 @@ from apps.org.tests.factories import EmployeeFactory
 from apps.tasks import services
 
 TASKS = "/api/v1/tasks/"
+# Completing a task requires a work response (extra keys are ignored by the other actions).
+WORK = {"complete": {"work_response": "Work done."}}
 pytestmark = pytest.mark.django_db
 
 
@@ -115,7 +117,7 @@ def test_received_at_can_be_corrected_after_completion_by_manager(client_for, op
     rahul = client_for(ops["rahul"])
     for action in ("start", "complete"):
         task.refresh_from_db()
-        rahul.post(f"{TASKS}{task.pk}/{action}/", {"version": task.version})
+        rahul.post(f"{TASKS}{task.pk}/{action}/", {"version": task.version, **WORK.get(action, {})})
     response = _patch(
         client_for(ops["manager"]),
         task,

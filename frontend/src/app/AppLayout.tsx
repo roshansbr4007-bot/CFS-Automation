@@ -94,7 +94,14 @@ export function AppLayout() {
         sx={{
           width: DRAWER_WIDTH,
           flexShrink: 0,
-          "& .MuiDrawer-paper": { width: DRAWER_WIDTH, border: 0 },
+          "& .MuiDrawer-paper": {
+            width: DRAWER_WIDTH,
+            border: 0,
+            height: "100vh",
+            overflowY: "auto",
+            overflowX: "hidden",
+            boxSizing: "border-box",
+          },
         }}
       >
         <DrawerContent onNavigate={() => setOpen(false)} />

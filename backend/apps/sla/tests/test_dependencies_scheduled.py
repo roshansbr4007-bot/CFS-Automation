@@ -33,7 +33,9 @@ def _complete(task, user):
     task.refresh_from_db()
     task_services.start_task(actor=user, task=task, version=task.version)
     task.refresh_from_db()
-    return task_services.complete_task(actor=user, task=task, version=task.version)
+    return task_services.complete_task(
+        actor=user, task=task, version=task.version, work_response="Work done."
+    )
 
 
 def _task(responsibility, day):

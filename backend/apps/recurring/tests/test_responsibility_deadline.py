@@ -1,6 +1,7 @@
 """Responsibility deadline (SLA): defined by HR / Admin on a responsibility; scheduled tasks
 generated from it use it (over the task type and priority SLA); manual tasks keep the priority
-SLA (Critical 8 h, High 24 h, Medium 48 h, Low 72 h). Clock start = generation (assignment) time.
+SLA (Critical 8 h, High 24 h, Medium 48 h, Low 72 h). Clock start = the occurrence's SCHEDULED
+time (approved S1; it was the generation time before the scheduling fix), even when generated late.
 """
 
 from datetime import date, datetime, time, timedelta

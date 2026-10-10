@@ -129,7 +129,9 @@ def test_hold_resume_reassignment_and_completion_never_change_the_facts(admin_us
         task.refresh_from_db()
         task_services.start_task(actor=ops["amit"], task=task, version=task.version)
         task.refresh_from_db()
-        task_services.complete_task(actor=ops["amit"], task=task, version=task.version)
+        task_services.complete_task(
+            actor=ops["amit"], task=task, version=task.version, work_response="Work done."
+        )
     task.refresh_from_db()
     assert _facts(task) == before
     assert clock(task).start_at == ist(2026, 10, 5, 11, 20)  # the hold moved the SLA start ...

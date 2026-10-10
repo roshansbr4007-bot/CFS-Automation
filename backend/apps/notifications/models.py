@@ -16,6 +16,8 @@ class NotificationKind(models.TextChoices):
     # Phase 9 (in-app only; no email): the overdue case reason / review steps.
     OVERDUE_REASON = "OVERDUE_REASON", "Overdue reason needed"
     OVERDUE_REVIEW = "OVERDUE_REVIEW", "Overdue reason submitted — review needed"
+    # Responsibility owner change (in-app only): today's open task moved to the new owner.
+    TASK_REASSIGNED = "TASK_REASSIGNED", "Task moved to a new responsibility owner"
 
 
 class EmailStatus(models.TextChoices):

@@ -52,7 +52,9 @@ def work(ops, new_task, ist, sla_60):
                 task.refresh_from_db()
                 task_services.start_task(actor=user, task=task, version=task.version)
                 task.refresh_from_db()
-                task_services.complete_task(actor=user, task=task, version=task.version)
+                task_services.complete_task(
+                    actor=user, task=task, version=task.version, work_response="Work done."
+                )
 
         def cancel(self, task, *at):
             with time_machine.travel(ist(*at), tick=False):

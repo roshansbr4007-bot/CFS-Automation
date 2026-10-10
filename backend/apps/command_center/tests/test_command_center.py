@@ -59,16 +59,16 @@ def test_admin_only(api_client, client_for, make_user, admin_client, probes, url
 # --- aggregation (reuses the existing monitoring rows and SLA engine) ------------------------
 
 
-def _act(client, task, name):
+def _act(client, task, name, **body):
     task.refresh_from_db()
-    return client.post(f"{TASKS}{task.pk}/{name}/", {"version": task.version})
+    return client.post(f"{TASKS}{task.pk}/{name}/", {"version": task.version, **body})
 
 
 def _complete(client_for, user, task, ist, *at):
     with time_machine.travel(ist(*at), tick=False):
         client = client_for(user)
         assert _act(client, task, "start").status_code == 200
-        assert _act(client, task, "complete").status_code == 200
+        assert _act(client, task, "complete", work_response="Work done.").status_code == 200
 
 
 def test_summary_aggregates_today_from_existing_definitions(

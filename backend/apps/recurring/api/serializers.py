@@ -26,6 +26,7 @@ from ..models import (
 from ..services import (
     can_manage,
     can_manage_deadline,
+    can_manage_owner,
     can_manage_schedule,
     current_owner_row,
     deadline_minutes,
@@ -68,6 +69,38 @@ class ResponsibilityOwnerSerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
 
+class TransferredTaskSerializer(serializers.Serializer):
+    id = serializers.IntegerField()
+    reference = serializers.CharField()
+    title = serializers.CharField()
+
+
+class TodayGenerationSerializer(serializers.Serializer):
+    schedule_id = serializers.IntegerField(allow_null=True)
+    occurrence_date = serializers.DateField()
+    result = serializers.ChoiceField(
+        choices=["generated", "recovered", "existing", "skipped", "missed", "failed", "not_due"],
+        help_text="existing: today's task exists. skipped / missed / failed: today's occurrence "
+        "was not generated (see detail). not_due: today's run time has not come yet (it is "
+        "generated at its run time) or the schedule has no occurrence today.",
+    )
+    detail = serializers.CharField(allow_null=True)
+
+
+class OwnerAssignmentResultSerializer(ResponsibilityOwnerSerializer):
+    """The new ownership row, plus what happened to TODAY's work when the owner starts today:
+    the open tasks moved from the previous owner, and today's immediate generation outcome.
+    Both are empty when the owner starts on a later date."""
+
+    transferred_tasks = TransferredTaskSerializer(many=True, read_only=True)
+    today_generation = TodayGenerationSerializer(many=True, read_only=True)
+
+    class Meta(ResponsibilityOwnerSerializer.Meta):
+        fields = [*ResponsibilityOwnerSerializer.Meta.fields, "transferred_tasks",
+                  "today_generation"]
+        read_only_fields = fields
+
+
 class ResponsibilitySerializer(serializers.ModelSerializer):
     department = DepartmentRefSerializer(read_only=True)
     category = CategoryRefSerializer(read_only=True)
@@ -77,6 +110,7 @@ class ResponsibilitySerializer(serializers.ModelSerializer):
     can_manage = serializers.SerializerMethodField()
     deadline_minutes = serializers.SerializerMethodField()
     can_manage_deadline = serializers.SerializerMethodField()
+    can_manage_owner = serializers.SerializerMethodField()
 
     class Meta:
         model = Responsibility
@@ -95,6 +129,7 @@ class ResponsibilitySerializer(serializers.ModelSerializer):
             "can_manage",
             "deadline_minutes",
             "can_manage_deadline",
+            "can_manage_owner",
             "version",
             "created_at",
             "updated_at",
@@ -134,6 +169,33 @@ class ResponsibilitySerializer(serializers.ModelSerializer):
             and can_manage_deadline(request.user)
         )
 
+    def get_can_manage_owner(self, responsibility) -> bool:
+        """HR / Admin may assign, change or end the owner (server-decided; locked rule A)."""
+        request = self.context.get("request")
+        return bool(
+            request
+            and request.user.is_authenticated
+            and responsibility.is_active
+            and can_manage_owner(request.user)
+        )
+
+
+
+class ResponsibilitySetupResultSerializer(ResponsibilitySerializer):
+    """The created responsibility, plus today's immediate generation outcome when its owner
+    starts today (empty otherwise)."""
+
+    today_generation = serializers.SerializerMethodField()
+
+    class Meta(ResponsibilitySerializer.Meta):
+        fields = [*ResponsibilitySerializer.Meta.fields, "today_generation"]
+        read_only_fields = fields
+
+    @extend_schema_field(TodayGenerationSerializer(many=True))
+    def get_today_generation(self, responsibility) -> list:
+        return TodayGenerationSerializer(
+            self.context.get("today_generation", []), many=True
+        ).data
 
 class ResponsibilityCreateSerializer(serializers.Serializer):
     code = serializers.CharField(max_length=40)

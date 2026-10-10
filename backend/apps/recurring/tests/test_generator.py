@@ -194,14 +194,15 @@ def test_inactive_owner_is_skipped_not_reassigned(ops, resp, own, ist):
     assert feed.status == "SKIPPED" and "inactive" in feed.detail
 
 
-def test_owner_changes_apply_to_future_occurrences_only(ops, resp, ist):
+def test_owner_changes_apply_to_future_occurrences_only(admin_user, ops, resp, ist):
     feed = resp("FEED_UPLOAD")
+    # Locked rule A: HR / Admin change owners (this test used the Operations Manager before).
     with time_machine.travel(ist(2026, 10, 1, 9, 0), tick=False):
-        assign_owner(actor=ops["manager"], responsibility=feed, employee=ops["rahul_emp"],
+        assign_owner(actor=admin_user, responsibility=feed, employee=ops["rahul_emp"],
                      effective_from=date(2026, 10, 1))
     _run(ist, 2026, 10, 5, 10, 0)
     with time_machine.travel(ist(2026, 10, 6, 9, 0), tick=False):
-        assign_owner(actor=ops["manager"], responsibility=feed, employee=ops["amit_emp"],
+        assign_owner(actor=admin_user, responsibility=feed, employee=ops["amit_emp"],
                      effective_from=date(2026, 10, 10))
     _run(ist, 2026, 10, 12, 10, 0)
     by_day = dict(

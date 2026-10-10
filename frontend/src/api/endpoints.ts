@@ -1,5 +1,5 @@
 import { api, apiUpload } from "./apiClient";
-import type { AppNotification, AssigneeOption, AuditEntry, CalendarDay, CommandCenterEmployeeDetail, CommandCenterFilters, CommandCenterHealth, CommandCenterSummary, SlaAttention, DailyActivityList, EmployeeAssignedTasks, EmployeeDailyActivities, OperationsSummary, TeamOperationsSummary, CalendarDayKind, CompanyCalendar, DailyLogin, Department, DepartmentInput, Employee, EmployeeInput, EmployeeUpdateInput, Me, OverdueCase, OverdueCaseFilters, OverdueReasonInput, OverdueReviewInput, Paginated, RecurringSchedule, Responsibility, ResponsibilityInput, ResponsibilityOwner, ResponsibilitySetupInput, Role, ScheduleCreateInput, ScheduleOccurrence, Task, TaskAttachment, TaskComment, TaskCategory, TaskCreateInput, TaskDetail, TaskSla, TaskTemplate, TaskView, SlaPreviewInput, User, UserCreateInput, UserUpdateInput } from "./types";
+import type { AppNotification, AssigneeOption, AuditEntry, CalendarDay, CommandCenterEmployeeDetail, CommandCenterFilters, CommandCenterHealth, CommandCenterSummary, SlaAttention, DailyActivityList, EmployeeAssignedTasks, EmployeeDailyActivities, OperationsSummary, OwnerAssignmentResult, ResponsibilitySetupResult, TeamOperationsSummary, CalendarDayKind, CompanyCalendar, DailyLogin, Department, DepartmentInput, Employee, EmployeeInput, EmployeeUpdateInput, Me, OverdueCase, OverdueCaseFilters, OverdueReasonInput, OverdueReviewInput, Paginated, RecurringSchedule, Responsibility, ResponsibilityInput, ResponsibilityOwner, ResponsibilitySetupInput, Role, ScheduleCreateInput, ScheduleOccurrence, Task, TaskAttachment, TaskComment, TaskCategory, TaskCreateInput, TaskDetail, TaskSla, TaskTemplate, TaskView, SlaPreviewInput, User, UserCreateInput, UserUpdateInput } from "./types";
 
 export const authApi = {
   me: () => api<Me>("/auth/me/"),
@@ -94,12 +94,12 @@ export const responsibilitiesApi = {
     api<Responsibility>(`/responsibilities/${id}/`, { method: "PATCH", body: input }),
   owners: (id: number) => api<ResponsibilityOwner[]>(`/responsibilities/${id}/owners/`),
   assignOwner: (id: number, input: { employee: number; effective_from: string; note?: string }) =>
-    api<ResponsibilityOwner>(`/responsibilities/${id}/owners/`, { method: "POST", body: input }),
+    api<OwnerAssignmentResult>(`/responsibilities/${id}/owners/`, { method: "POST", body: input }),
   endOwnership: (id: number, input: { last_day: string; note?: string }) =>
     api<ResponsibilityOwner>(`/responsibilities/${id}/end-ownership/`, { method: "POST", body: input }),
   /** Phase A: responsibility + optional owner + first schedule in one transaction. */
   setup: (input: ResponsibilitySetupInput) =>
-    api<Responsibility>("/responsibilities/setup/", { method: "POST", body: input }),
+    api<ResponsibilitySetupResult>("/responsibilities/setup/", { method: "POST", body: input }),
 };
 export const schedulesApi = {
   list: () => api<RecurringSchedule[]>("/recurring-schedules/"),

@@ -29,7 +29,7 @@ def test_assignee_starts_and_completes(client_for, ops, rahul_task):
     started = _act(client, rahul_task, "start")
     assert started.status_code == 200
     assert started.json()["status"] == "IN_PROGRESS" and started.json()["started_at"]
-    done = _act(client, rahul_task, "complete")
+    done = _act(client, rahul_task, "complete", work_response="Work done.")
     body = done.json()
     assert body["status"] == "COMPLETED" and body["completed_at"]
     assert body["completed_by"]["id"] == ops["rahul"].pk
@@ -52,7 +52,7 @@ def test_completion_with_verification_required_waits_for_verification(client_for
     task = new_task(ops["manager"], ops["rahul_emp"], verification_required=True)
     client = client_for(ops["rahul"])
     _act(client, task, "start")
-    body = _act(client, task, "complete").json()
+    body = _act(client, task, "complete", work_response="Work done.").json()
     assert body["status"] == "COMPLETED"  # never a sixth status
     assert body["verification_status"] == "PENDING"
 
@@ -95,7 +95,7 @@ def test_completion_needs_acknowledgment_too(client_for, ops, new_task):
     gate = _act(amit, task, "complete")
     assert gate.status_code == 409 and gate.json()["code"] == "acknowledgment_required"
     _act(amit, task, "acknowledge")
-    assert _act(amit, task, "complete").status_code == 200
+    assert _act(amit, task, "complete", work_response="Work done.").status_code == 200
 
 
 # --- block / unblock --------------------------------------------------------------------------
@@ -231,7 +231,7 @@ def test_version_is_required(client_for, ops, rahul_task):
 def test_every_action_bumps_the_version(client_for, ops, rahul_task):
     client = client_for(ops["rahul"])
     assert _act(client, rahul_task, "start").json()["version"] == 2
-    assert _act(client, rahul_task, "complete").json()["version"] == 3
+    assert _act(client, rahul_task, "complete", work_response="Work done.").json()["version"] == 3
 
 
 def test_delete_needs_a_version_and_put_is_not_offered(admin_client, rahul_task):

@@ -28,6 +28,7 @@ from .errors import (
     TaskVersionConflict,
 )
 from .models import (
+    CommentKind,
     CompletionSource,
     DependencyState,
     Task,
@@ -498,7 +499,35 @@ def start_task(*, actor, task: Task, version: int) -> Task:
     return task
 
 
-def complete_task(*, actor, task: Task, version: int) -> Task:
+WORK_RESPONSE_MAX_LENGTH = 5000
+
+
+def _require_work_response(value) -> str:
+    """The assignee's report of the work performed: required, trimmed, never blank."""
+    value = (value or "").strip()
+    if not value:
+        raise FieldValidationError(
+            fields={"work_response": ["Describe the work you did before completing the task."]}
+        )
+    if len(value) > WORK_RESPONSE_MAX_LENGTH:
+        raise FieldValidationError(
+            fields={
+                "work_response": [
+                    f"Ensure this field has no more than {WORK_RESPONSE_MAX_LENGTH} characters."
+                ]
+            }
+        )
+    return value
+
+
+def complete_task(*, actor, task: Task, version: int, work_response: str) -> Task:
+    """Submit the work response and complete the task, in one transaction (no approval step).
+
+    The checks run in their existing order (version, status, assignee, acknowledgment) so an
+    invalid transition or a non-assignee is still refused as before; the response is validated
+    last, and nothing is written unless every check passes. The response is stored as a
+    WORK_RESPONSE comment (append-only) authored by the assignee, created at the completion
+    instant, and the task.completed audit event references it."""
     with transaction.atomic():
         task = _lock(task, version)
         if task.status != TaskStatus.IN_PROGRESS:
@@ -507,7 +536,14 @@ def complete_task(*, actor, task: Task, version: int) -> Task:
             raise TaskPermissionDenied("Only the assignee can complete this task.")
         if policy.acknowledgment_outstanding(task):
             raise AcknowledgmentRequired()
+        work_response = _require_work_response(work_response)
         now = timezone.now()
+        response = TaskComment.objects.create(
+            task=task, author=actor, body=work_response, kind=CommentKind.WORK_RESPONSE
+        )
+        # created_at is auto_now_add; align it with the completion instant so both are one fact.
+        TaskComment.objects.filter(pk=response.pk).update(created_at=now)
+        response.created_at = now
         task.status = TaskStatus.COMPLETED
         task.completed_at = now
         task.completed_by = actor
@@ -540,6 +576,8 @@ def complete_task(*, actor, task: Task, version: int) -> Task:
                 "status": task.status,
                 "completed_at": _iso(now),
                 "verification_status": task.verification_status,
+                "work_response_id": response.pk,
+                "work_response_length": len(work_response),
             },
             extra={"rework_seconds": rework_seconds} if rework_seconds is not None else None,
         )

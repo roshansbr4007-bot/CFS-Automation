@@ -217,3 +217,28 @@ def notify_schedule_warning(occurrence, reason: str) -> None:
         for user in schedule_warning_recipients(occurrence)
     ]
     Notification.objects.bulk_create(rows, ignore_conflicts=True)
+
+
+def notify_task_transferred(task, previous, new_owner, assignment) -> None:
+    """In-app notice to the PREVIOUS owner that today's task moved to the new responsibility owner
+    (locked rule E). No email. Deduplicated per assignment, so it is written once."""
+    user = previous.user
+    if user is None or not user.is_active:
+        logger.info("Task %s moved: previous owner %s has no active login", task.pk, previous.pk)
+        return
+    Notification.objects.bulk_create(
+        [
+            Notification(
+                recipient=user,
+                task=None,  # no link: the previous owner may no longer see the task
+                kind=NotificationKind.TASK_REASSIGNED,
+                title=f"{task.reference} moved to {new_owner.full_name}: {task.title}"[:200],
+                body=(
+                    f"The responsibility owner changed, so \"{task.title}\" is now assigned to "
+                    f"{new_owner.full_name}. Its deadline and history are unchanged."
+                ),
+                dedup_key=f"transfer:{assignment.pk}:{user.pk}",
+            )
+        ],
+        ignore_conflicts=True,
+    )
