@@ -75,4 +75,11 @@ export const server = setupServer(
   http.get("*/api/v1/notifications/", () =>
     HttpResponse.json({ count: 0, next: null, previous: null, results: [] }),
   ),
+  // Phase 7.4: Home asks for my KRA months; by default the login has no employee record.
+  http.get("*/api/v1/performance/my/kra-months/", () =>
+    HttpResponse.json(
+      { code: "no_employee_record", message: "You do not have an employee record yet.", fields: {} },
+      { status: 404 },
+    ),
+  ),
 );

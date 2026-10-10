@@ -1,0 +1,12 @@
+{
+"rewrites": [
+{
+"source": "/api/(.*)",
+"destination": "https://cfs-automation.onrender.com/api/$1"
+},
+{
+"source": "/(.*)",
+"destination": "/index.html"
+}
+]
+}

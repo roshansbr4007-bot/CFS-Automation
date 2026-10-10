@@ -231,4 +231,41 @@ describe("Tasks page", () => {
     expect(within(daily).getByText("No deadline")).toBeInTheDocument();
     expect(within(daily).getByText("No SLA")).toBeInTheDocument();
   });
+
+  it("shows the scheduled time apart from a different SLA start, and the arrival flag", async () => {
+    server.use(...taskHandlers([]));
+    server.use(http.get("*/api/v1/tasks/daily-activities/", () => HttpResponse.json({
+      date: "2026-10-05", server_time: "2026-10-05T07:30:00Z", activities: [
+        // Generated late, then held for 30 minutes: scheduled 10:00, SLA now runs from 10:30.
+        makeActivity({ sla_start_at: "2026-10-05T10:30:00+05:30", scheduled_start: "2026-10-05T10:30:00+05:30", arrived_overdue: true }),
+        // A response from a server without the scheduling fix: only scheduled_start.
+        makeActivity({
+          task_id: 3, reference: "T-000003", responsibility: { id: 2, code: "MAIL_CHECKING", name: "Mail Checking" },
+          scheduled_start: "2026-10-05T09:00:00+05:30", scheduled_at: undefined, sla_start_at: undefined,
+          arrived_overdue: undefined, ack_arrived_overdue: undefined,
+        }),
+      ],
+    })));
+    renderApp("/tasks");
+    const daily = await screen.findByRole("table", { name: "Daily / scheduled responsibilities" });
+    expect(await within(daily).findByText("Mail Checking")).toBeInTheDocument();
+    expect(within(daily).getByRole("columnheader", { name: "Scheduled" })).toBeInTheDocument();
+    expect(within(daily).queryByRole("columnheader", { name: "Start" })).not.toBeInTheDocument();
+    const [late, older] = within(daily).getAllByRole("row").slice(1);
+    expect(within(late).getByText("10:00")).toBeInTheDocument();
+    expect(within(late).getByText("SLA start 10:30")).toBeInTheDocument();
+    expect(within(late).getByText("Arrived overdue")).toBeInTheDocument();
+    expect(within(older).getByText("09:00")).toBeInTheDocument();
+    expect(within(older).queryByText(/SLA start/)).not.toBeInTheDocument();
+    expect(within(older).queryByText("Arrived overdue")).not.toBeInTheDocument();
+  });
+
+  it("shows no flag and no SLA-start line for an on-time activity", async () => {
+    server.use(...taskHandlers([]));
+    renderApp("/tasks");
+    const daily = await screen.findByRole("table", { name: "Daily / scheduled responsibilities" });
+    expect(await within(daily).findByText("10:00")).toBeInTheDocument();
+    expect(within(daily).queryByText(/SLA start/)).not.toBeInTheDocument();
+    expect(within(daily).queryByText("Arrived overdue")).not.toBeInTheDocument();
+  });
 });

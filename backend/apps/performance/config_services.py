@@ -505,6 +505,18 @@ def plan_activation_problems(version) -> list[str]:
     return problems
 
 
+def plan_readiness(version) -> list[str]:
+    """Phase 7.5A, read-only: what would stop Admin activating this version right now (empty =
+    ready). The same state checks as activate_plan_version (same messages), then
+    plan_activation_problems unchanged. Nothing is locked, written or audited; activation
+    re-checks everything under its locks and remains the only authority."""
+    if version.calculation_model != KRA:
+        return ["Legacy weight versions are read-only here."]
+    if version.status != DRAFT:
+        return ["Only a draft plan can be activated."]
+    return plan_activation_problems(version)
+
+
 def _component_problems(line_name, component) -> list[str]:
     problems = []
     if component.source_type == ComponentSource.MANUAL_ENTRY:

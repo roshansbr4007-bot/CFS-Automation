@@ -254,7 +254,9 @@ def create_scheduled_task(*, scheduler, schedule, occurrence_date, assignee, gen
 
     The scheduler identity is the creator; the responsibility's owner for that date is the
     assignee. Department, category, priority and task type come from the responsibility; the
-    task type (template) drives the existing SLA engine exactly as for any other task.
+    task type (template) chooses the SLA rule, and the SLA engine starts every clock of the task
+    at its scheduled time (apps.sla.services.on_task_created), except a clock that waits on the
+    dependency engine.
     """
     responsibility = schedule.responsibility
     template = responsibility.template

@@ -58,7 +58,14 @@ const DETAIL: CommandCenterEmployeeDetail = {
     responsibility: { id: 1, code: "FEED_UPLOAD", name: "Feed Upload" }, occurrence_date: "2026-10-05",
     scheduled_start: "2026-10-05T04:30:00Z", deadline: "2026-10-05T06:30:00Z", status: "COMPLETED", sla_state: "ON_TRACK",
     sla_note: null, remaining_seconds: null, completed_at: "2026-10-05T05:30:00Z", completion_result: "ON_TIME",
-    is_overdue: false, assignee: { id: 10, full_name: "Sourabh Mishra" }, source: "SCHEDULED" }],
+    is_overdue: false, assignee: { id: 10, full_name: "Sourabh Mishra" }, source: "SCHEDULED" },
+  // Scheduling fix (S5/S6): generated at 12:30 IST, already past its 12:00 deadline.
+  { task_id: 23, reference: "T-000023", title: "Mail Checking — 05 Oct 2026",
+    responsibility: { id: 2, code: "MAIL_CHECKING", name: "Mail Checking" }, occurrence_date: "2026-10-05",
+    scheduled_start: "2026-10-05T04:30:00Z", scheduled_at: "2026-10-05T04:30:00Z", sla_start_at: "2026-10-05T04:30:00Z",
+    arrived_overdue: true, ack_arrived_overdue: null, deadline: "2026-10-05T06:30:00Z", status: "PENDING",
+    sla_state: "OVERDUE", sla_note: null, remaining_seconds: -5400, completed_at: null, completion_result: null,
+    is_overdue: true, assignee: { id: 10, full_name: "Sourabh Mishra" }, source: "SCHEDULED" }],
   assigned_tasks: [{ task_id: 22, reference: "T-000022", title: "Map RM codes", priority: "HIGH",
     raised_by: { id: 2, email: "ops@example.com", full_name: "Ops Manager" }, department: { id: 1, code: "OPS", name: "Operations" },
     category: { id: 3, code: "OPERATIONS", name: "Operations" }, assigned_at: "2026-10-03T04:30:00Z",
@@ -189,7 +196,12 @@ describe("Command center (Admin = Boss)", () => {
     await userEvent.click(within(employees).getByRole("button", { name: "View" }));
     const daily = await screen.findByRole("table", { name: "Employee daily activities" });
     expect(await within(daily).findByText("Feed Upload")).toBeInTheDocument();
-    expect(within(daily).getByText("Daily activity")).toBeInTheDocument();
+    expect(within(daily).getAllByText("Daily activity")).toHaveLength(2);
+    expect(within(daily).getByRole("columnheader", { name: "Scheduled" })).toBeInTheDocument();
+    expect(within(daily).queryByRole("columnheader", { name: "Scheduled start" })).not.toBeInTheDocument();
+    const [feed, mail] = within(daily).getAllByRole("row").slice(1);
+    expect(within(feed).queryByText("Arrived overdue")).not.toBeInTheDocument(); // older response shape
+    expect(within(mail).getByText("Arrived overdue")).toBeInTheDocument();
     const tasks = screen.getByRole("table", { name: "Employee assigned tasks" });
     expect(within(tasks).getByText("Map RM codes")).toBeInTheDocument();
     expect(within(tasks).getByText("Assigned task")).toBeInTheDocument();

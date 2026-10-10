@@ -48,6 +48,8 @@ export function makeActivity(overrides: Partial<DailyActivity> = {}): DailyActiv
     task_id: 2, reference: "T-000002", title: "Feed Upload — 05 Oct 2026",
     responsibility: { id: 1, code: "FEED_UPLOAD", name: "Feed Upload" }, occurrence_date: "2026-10-05",
     scheduled_start: "2026-10-05T10:00:00+05:30", deadline: "2026-10-05T12:00:00+05:30", status: "PENDING",
+    scheduled_at: "2026-10-05T10:00:00+05:30", sla_start_at: "2026-10-05T10:00:00+05:30",
+    arrived_overdue: false, ack_arrived_overdue: null,
     sla_state: "WARNING", sla_note: null, remaining_seconds: 3630, completed_at: null, completion_result: null,
     is_overdue: false, assignee: { id: 10, full_name: "Rahul Sharma" }, ...overrides,
   };

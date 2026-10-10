@@ -140,6 +140,22 @@ class KpiCfgPlanDetailSerializer(KpiCfgPlanSerializer):
     deduction_rules = KpiCfgDeductionRuleSerializer(many=True)
 
 
+class KpiCfgPlanReadinessSerializer(serializers.Serializer):
+    """Phase 7.5A: read-only activation readiness of a plan version."""
+
+    plan_id = serializers.IntegerField()
+    status = serializers.CharField()
+    calculation_model = serializers.CharField()
+    ready = serializers.BooleanField(help_text="True when Admin could activate it right now.")
+    problems = serializers.ListField(
+        child=serializers.CharField(),
+        help_text="Exactly what activation would refuse with (empty when ready).",
+    )
+    checked_on = serializers.DateField(
+        help_text="The IST date of the check (the effective date must be after it)."
+    )
+
+
 class KpiCfgStepSerializer(serializers.Serializer):
     min_achievement_pct = serializers.DecimalField(max_digits=5, decimal_places=2)
     score_pct = serializers.DecimalField(max_digits=5, decimal_places=2)

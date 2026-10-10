@@ -147,6 +147,25 @@ ENDPOINTS = [
     ("get", "/api/v1/performance/assignments/", "kpi_config_read"),
     ("post", "/api/v1/performance/assignments/", "kpi_config_write"),
     ("get", "/api/v1/performance/plan-resolution/", "kpi_config_read"),
+    # Phase 7.5A: the read-only readiness check, and configuration routes the new screens use
+    # that were not listed before (999999 does not exist: allowed callers get 404)
+    ("get", "/api/v1/performance/plans/{plan}/readiness/", "kpi_config_read"),
+    ("get", "/api/v1/performance/kpis/{kpi}/", "kpi_config_read"),
+    ("delete", "/api/v1/performance/plans/999999/", "kpi_config_write"),
+    ("get", "/api/v1/performance/plan-lines/{line}/", "kpi_config_read"),
+    ("delete", "/api/v1/performance/plan-lines/999999/", "kpi_config_write"),
+    ("get", "/api/v1/performance/components/999999/", "kpi_config_read"),
+    ("patch", "/api/v1/performance/components/999999/", "kpi_config_write"),
+    ("delete", "/api/v1/performance/components/999999/", "kpi_config_write"),
+    ("get", "/api/v1/performance/deduction-rules/999999/", "kpi_config_read"),
+    ("patch", "/api/v1/performance/deduction-rules/999999/", "kpi_config_write"),
+    ("delete", "/api/v1/performance/deduction-rules/999999/", "kpi_config_write"),
+    ("get", "/api/v1/performance/scoring-rules/{rule}/", "kpi_config_read"),
+    ("get", "/api/v1/performance/band-schemes/{scheme}/", "kpi_config_read"),
+    ("post", "/api/v1/performance/band-schemes/{scheme}/clone/", "kpi_config_write"),
+    ("post", "/api/v1/performance/band-schemes/{scheme}/retire/", "kpi_config_approve"),
+    ("post", "/api/v1/performance/plan-defaults/999999/end/", "kpi_config_write"),
+    ("post", "/api/v1/performance/assignments/999999/end/", "kpi_config_write"),
     # Phase 7.3 KRA review (month 999999 does not exist: allowed callers get 400 / 404)
     ("post", "/api/v1/performance/months/calculate/", "kra_review_write"),
     ("get", "/api/v1/performance/months/999999/", "kra_review_read"),
@@ -169,6 +188,14 @@ ENDPOINTS = [
     ("post", "/api/v1/performance/task-overrides/", "kra_review_write"),
     ("post", "/api/v1/performance/task-overrides/999999/remove/", "kra_review_write"),
     ("get", "/api/v1/performance/annual/", "kra_review_read"),
+    # Phase 7.4: own KRA performance (any signed-in user; 404 without an own employee record)
+    ("get", "/api/v1/performance/my/kra-months/", "logged_in"),
+    ("get", "/api/v1/performance/my/kra-months/999999/", "logged_in"),
+    ("get", "/api/v1/performance/my/annual/", "logged_in"),
+    # Phase 7.4: organisation-wide KRA months and exports (HR, Admin; Ops Manager none - P11)
+    ("get", "/api/v1/performance/months/", "kra_review_read"),
+    ("get", "/api/v1/performance/months/export/csv/", "kra_review_read"),
+    ("get", "/api/v1/performance/months/export/excel/", "kra_review_read"),
 ]
 
 

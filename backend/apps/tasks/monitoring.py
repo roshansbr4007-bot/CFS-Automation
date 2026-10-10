@@ -12,14 +12,24 @@ Definitions (documented, deterministic):
   by the end of D; "overdue" = pending and its SLA deadline passed (by the end of D, or by now
   for today). Ad-hoc tasks without an SLA have no deadline and are never overdue.
 - On time / late: the SLA engine's recorded outcome (MET / MISSED) of the resolution clock.
+- Scheduled time vs SLA start (approved S6): `scheduled_at` is when the occurrence was scheduled
+  (recorded at generation); `sla_start_at` is when the resolution clock actually runs from (a hold
+  moves it; null while waiting). `scheduled_start` keeps its earlier meaning (the SLA start, or
+  the schedule time while not started) for existing clients.
+- Arrival facts (approved S5, S7, Q1, Q4): read-only, from the task's recurring.task_generated
+  audit entry. `arrived_overdue` is about the resolution clock only; `ack_arrived_overdue` is the
+  separate acknowledgment fact. A task generated before these facts were recorded has null facts
+  (unknown, never guessed) and a best-effort scheduled time from its schedule's current run time.
 """
 
 from datetime import date, datetime, time, timedelta
 
 from django.db.models import Q
 
+from apps.audit.models import AuditLog
 from apps.core.timeutils import ist_datetime, to_ist
 from apps.org.models import Employee
+from apps.recurring.models import ScheduleOccurrence
 from apps.sla import services as sla
 from apps.sla.models import SlaState
 
@@ -49,12 +59,68 @@ def _with_related(qs):
     ).prefetch_related("sla_clocks")
 
 
-def activity_row(task, now: datetime) -> dict:
+def _estimated_scheduled_at(task) -> datetime | None:
+    """Best effort for tasks without recorded facts: the schedule's CURRENT run time."""
+    return sla.scheduled_time(task)
+
+
+UNKNOWN_ARRIVAL = {"scheduled_at": None, "arrived_overdue": None, "ack_arrived_overdue": None}
+
+
+def arrival_facts(tasks) -> dict[int, dict]:
+    """{task id: {scheduled_at, arrived_overdue, ack_arrived_overdue}} for the SCHEDULED tasks
+    among `tasks`, in two queries whatever their number. The facts come from the task's own
+    recurring.task_generated entry: the entry is filed under the task's occurrence and must name
+    this task. Tasks without such an entry (generated before the facts were recorded) get null
+    facts and an estimated scheduled time; should there ever be two entries, the first wins."""
+    scheduled = [t for t in tasks if t.source == TaskSource.SCHEDULED]
+    if not scheduled:
+        return {}
+    occurrence_task = dict(
+        ScheduleOccurrence.objects.filter(task_id__in=[t.pk for t in scheduled]).values_list(
+            "pk", "task_id"
+        )
+    )
+    entries: dict[int, dict] = {}
+    if occurrence_task:
+        rows = (
+            AuditLog.objects.filter(
+                entity_type="schedule_occurrence",
+                entity_id__in=[str(pk) for pk in occurrence_task],
+                action="recurring.task_generated",
+            )
+            .order_by("id")
+            .values_list("entity_id", "new_value", "context")
+        )
+        for entity_id, new, context in rows:
+            task_id = occurrence_task.get(int(entity_id))
+            if not isinstance(new, dict) or new.get("task_id") != task_id:
+                continue  # not this task's own generation entry
+            entries.setdefault(task_id, context or {})
+    facts = {}
+    for task in scheduled:
+        context = entries.get(task.pk)
+        if context is None or "scheduled_at" not in context:
+            facts[task.pk] = {**UNKNOWN_ARRIVAL, "scheduled_at": _estimated_scheduled_at(task)}
+            continue
+        recorded = context["scheduled_at"]
+        facts[task.pk] = {
+            "scheduled_at": datetime.fromisoformat(recorded) if recorded else None,
+            "arrived_overdue": context.get("resolution_overdue_on_arrival"),
+            "ack_arrived_overdue": context.get("ack_overdue_on_arrival"),
+        }
+    return facts
+
+
+def activity_row(task, now: datetime, facts: dict | None = None) -> dict:
+    """One daily activity. `facts`: this task's arrival_facts() entry (None: unknown)."""
     data = sla.task_sla(task, now)
     resolution = data["resolution"]
-    scheduled_start = resolution["start_at"] if resolution else None
-    if scheduled_start is None and task.schedule_id and task.occurrence_date:
-        scheduled_start = ist_datetime(task.occurrence_date, task.schedule.run_time)
+    sla_start_at = resolution["start_at"] if resolution else None
+    scheduled_start = sla_start_at
+    if scheduled_start is None:
+        scheduled_start = _estimated_scheduled_at(task)
+    facts = facts or {**UNKNOWN_ARRIVAL, "scheduled_at": _estimated_scheduled_at(task)}
     is_open = task.status in OPEN
     running = is_open and resolution is not None and resolution["start_at"] is not None
     return {
@@ -64,6 +130,10 @@ def activity_row(task, now: datetime) -> dict:
         "responsibility": task.responsibility,
         "occurrence_date": task.occurrence_date,
         "scheduled_start": scheduled_start,
+        "scheduled_at": facts["scheduled_at"],
+        "sla_start_at": sla_start_at,
+        "arrived_overdue": facts["arrived_overdue"],
+        "ack_arrived_overdue": facts["ack_arrived_overdue"],
         "deadline": resolution["due_at"] if resolution else None,
         "status": task.status,
         "sla_state": resolution["state"] if resolution else None,
@@ -74,6 +144,13 @@ def activity_row(task, now: datetime) -> dict:
         "is_overdue": running and resolution["state"] == SlaState.OVERDUE,
         "assignee": task.assigned_to,
     }
+
+
+def activity_rows(tasks, now: datetime) -> list[dict]:
+    """activity_row() for each task, with the arrival facts read in one batch."""
+    tasks = list(tasks)
+    facts = arrival_facts(tasks)
+    return [activity_row(t, now, facts.get(t.pk)) for t in tasks]
 
 
 def assigned_row(task, day: date, now: datetime) -> dict:
@@ -148,7 +225,7 @@ def my_daily_activities(user, day: date, now: datetime) -> list[dict]:
         return []
     today = to_ist(now).date()
     tasks = daily_activity_tasks([employee], day, carry_over_open=(day == today))
-    return [activity_row(t, now) for t in tasks]
+    return activity_rows(tasks, now)
 
 
 # --- counts -----------------------------------------------------------------------------------

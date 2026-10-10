@@ -1,6 +1,7 @@
 from django.urls import path
 
 from . import config_views as cfg
+from . import kra_report_views as kra
 from . import review_views as rev
 from .views import PerformanceCsvExportView, PerformanceExcelExportView, PerformanceReportView
 
@@ -27,6 +28,8 @@ urlpatterns = [
          name="performance-plan-activate"),
     path("performance/plans/<int:pk>/retire/", cfg.PlanRetireView.as_view(),
          name="performance-plan-retire"),
+    path("performance/plans/<int:pk>/readiness/", cfg.PlanReadinessView.as_view(),
+         name="performance-plan-readiness"),
     path("performance/plans/<int:pk>/lines/", cfg.PlanLineListView.as_view(),
          name="performance-plan-lines"),
     path("performance/plans/<int:pk>/deduction-rules/", cfg.DeductionRuleListView.as_view(),
@@ -105,4 +108,16 @@ urlpatterns = [
     path("performance/task-overrides/<int:pk>/remove/", rev.KraTaskOverrideRemoveView.as_view(),
          name="performance-task-override-remove"),
     path("performance/annual/", rev.KraAnnualView.as_view(), name="performance-annual"),
+    # --- Phase 7.4: own KRA performance (Employee Home) ---
+    path("performance/my/kra-months/", kra.KraMyHistoryView.as_view(),
+         name="performance-my-kra-months"),
+    path("performance/my/kra-months/<int:pk>/", kra.KraMyMonthView.as_view(),
+         name="performance-my-kra-month"),
+    path("performance/my/annual/", kra.KraMyAnnualView.as_view(), name="performance-my-annual"),
+    # --- Phase 7.4: organisation-wide KRA months (HR / Admin) ---
+    path("performance/months/", kra.KraMonthListView.as_view(), name="performance-months"),
+    path("performance/months/export/csv/", kra.KraMonthCsvExportView.as_view(),
+         name="performance-months-csv"),
+    path("performance/months/export/excel/", kra.KraMonthExcelExportView.as_view(),
+         name="performance-months-excel"),
 ]

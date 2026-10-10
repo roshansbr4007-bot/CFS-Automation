@@ -12,7 +12,7 @@ from apps.org.models import Department, Employee
 from apps.sla import services as sla
 from apps.sla.models import ClockKind, Outcome, SlaState, StopReason, Trigger
 
-from .. import policy
+from .. import monitoring, policy
 from ..models import (
     ReceivedSource,
     Task,
@@ -272,10 +272,49 @@ class TaskVerificationSerializer(serializers.ModelSerializer):
 class TaskDetailSerializer(TaskSerializer):
     assignments = TaskAssignmentSerializer(many=True, read_only=True)
     verifications = TaskVerificationSerializer(many=True, read_only=True)
+    # Approved S4-S6 (additive, read-only): a generated task's scheduled time and its arrival
+    # facts. Null for manual tasks; null facts for tasks generated before they were recorded.
+    scheduled_at = serializers.SerializerMethodField(
+        help_text="When the occurrence was scheduled (generated tasks only)."
+    )
+    arrived_overdue = serializers.SerializerMethodField(
+        help_text="The resolution SLA was already overdue when the task was generated "
+        "(system-caused). Null: not a generated task, or not recorded."
+    )
+    ack_arrived_overdue = serializers.SerializerMethodField(
+        help_text="The acknowledgment SLA was already overdue when the task was generated."
+    )
 
     class Meta(TaskSerializer.Meta):
-        fields = [*TaskSerializer.Meta.fields, "assignments", "verifications"]
+        fields = [
+            *TaskSerializer.Meta.fields,
+            "assignments",
+            "verifications",
+            "scheduled_at",
+            "arrived_overdue",
+            "ack_arrived_overdue",
+        ]
         read_only_fields = fields
+
+    def _arrival(self, task) -> dict:
+        cache = self.__dict__.setdefault("_arrival_cache", {})
+        if task.pk not in cache:
+            facts = monitoring.arrival_facts([task])
+            cache[task.pk] = facts.get(task.pk, dict(monitoring.UNKNOWN_ARRIVAL))
+        return cache[task.pk]
+
+    @extend_schema_field(serializers.DateTimeField(allow_null=True))
+    def get_scheduled_at(self, task):
+        value = self._arrival(task)["scheduled_at"]
+        return serializers.DateTimeField().to_representation(value) if value else None
+
+    @extend_schema_field(serializers.BooleanField(allow_null=True))
+    def get_arrived_overdue(self, task) -> bool | None:
+        return self._arrival(task)["arrived_overdue"]
+
+    @extend_schema_field(serializers.BooleanField(allow_null=True))
+    def get_ack_arrived_overdue(self, task) -> bool | None:
+        return self._arrival(task)["ack_arrived_overdue"]
 
 
 class TaskCreateSerializer(serializers.Serializer):
@@ -404,7 +443,27 @@ class DailyActivitySerializer(serializers.Serializer):
     title = serializers.CharField()
     responsibility = ResponsibilityRefSerializer(allow_null=True)
     occurrence_date = serializers.DateField(allow_null=True)
-    scheduled_start = serializers.DateTimeField(allow_null=True)
+    scheduled_start = serializers.DateTimeField(
+        allow_null=True,
+        help_text="Kept for existing clients: the SLA start, or the schedule time while the SLA "
+        "has not started. Prefer scheduled_at and sla_start_at.",
+    )
+    scheduled_at = serializers.DateTimeField(
+        allow_null=True, help_text="When the occurrence was scheduled (recorded at generation)."
+    )
+    sla_start_at = serializers.DateTimeField(
+        allow_null=True,
+        help_text="When the resolution SLA runs from (a hold moves it); null while not started.",
+    )
+    arrived_overdue = serializers.BooleanField(
+        allow_null=True,
+        help_text="The resolution SLA was already overdue when the task was generated "
+        "(system-caused). Null: not recorded (generated before this was tracked).",
+    )
+    ack_arrived_overdue = serializers.BooleanField(
+        allow_null=True,
+        help_text="The acknowledgment SLA was already overdue when the task was generated.",
+    )
     deadline = serializers.DateTimeField(allow_null=True)
     status = serializers.CharField(help_text="Task workflow status (PENDING, IN_PROGRESS, ...).")
     sla_state = serializers.CharField(allow_null=True, help_text="NOT_STARTED ... OVERDUE.")

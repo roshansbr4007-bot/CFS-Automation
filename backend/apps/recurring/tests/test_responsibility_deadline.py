@@ -162,9 +162,11 @@ def test_archived_responsibilities_and_invalid_values_are_refused(admin_client, 
 # --- scheduled tasks ----------------------------------------------------------------------------
 
 
-def test_a_scheduled_task_uses_the_responsibility_deadline_from_generation_time(
+def test_a_scheduled_task_uses_the_responsibility_deadline_from_the_scheduled_time(
     admin_user, duty, ist
 ):
+    """Approved S1 (scheduling fix): the responsibility deadline runs from the scheduled time,
+    not from generation. Before the fix this clock started at 10:20 (generation, ASSIGNMENT)."""
     _configure_priority_sla()  # the priority SLA exists, but must not win
     broker = TaskTemplate.objects.get(code="BROKER_MAPPING")  # own 24 h SLA, acknowledgment
     r = duty("BIRTHDAY_WISHES_DUTY", template=broker)
@@ -172,8 +174,9 @@ def test_a_scheduled_task_uses_the_responsibility_deadline_from_generation_time(
     task = _generate(r, 2026, 10, 5, 10, 20)  # generated 20 minutes after the 10:00 run time
     clock = _resolution(task)
     assert clock.rule_snapshot["code"] == f"RESP_{r.pk}"
-    assert clock.trigger == "ASSIGNMENT"
-    assert clock.start_at == ist(2026, 10, 5, 10, 20) == task.assigned_at  # not 10:00
+    assert clock.trigger == "FIXED_TIME"
+    assert clock.start_at == ist(2026, 10, 5, 10, 0)  # the scheduled time, not 10:20
+    assert task.assigned_at == ist(2026, 10, 5, 10, 20)  # generation is still recorded as is
     assert clock.due_at - clock.start_at == timedelta(hours=2)
     assert task.acknowledgment_required is True  # the task type's acknowledgment still applies
     assert TaskSla.objects.filter(task=task, kind="ACK").exists()

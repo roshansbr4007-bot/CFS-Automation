@@ -30,6 +30,13 @@ export const PERM = {
   viewAllOverdueCases: "overdue.view_all_cases",
   reviewTeamOverdueCases: "overdue.review_team_cases",
   reviewAllOverdueCases: "overdue.review_all_cases",
+  // Phase 7.4: KRA months are read by HR (manage / finalize / reopen) and Admin (reopen).
+  managePerformance: "performance.manage_performance",
+  finalizePerformance: "performance.finalize_performance",
+  reopenPerformance: "performance.reopen_performance",
+  // Phase 7.5A: KRA configuration. HR prepares drafts; Admin activates and retires.
+  configureKpis: "performance.configure_kpis",
+  approveKpiConfig: "performance.approve_kpi_config",
 } as const;
 
 export interface User {
@@ -123,7 +130,17 @@ export interface Task {
 }
 export interface TaskAssignment { id: number; from_employee: EmployeeRef | null; to_employee: EmployeeRef; assigned_by: UserRef; assigned_at: string; note: string; }
 export interface TaskVerification { cycle_no: number; submitted_at: string; decision: "VERIFIED" | "REJECTED"; rejection_reason: string; remarks: string; decided_by: UserRef; decided_at: string; rework_seconds: number | null; }
-export interface TaskDetail extends Task { assignments: TaskAssignment[]; verifications: TaskVerification[]; }
+export interface TaskDetail extends Task {
+  assignments: TaskAssignment[]; verifications: TaskVerification[];
+  /** Generated tasks: when the occurrence was scheduled; null for manual tasks. Optional for
+   * responses from servers older than the scheduling fix. */
+  scheduled_at?: string | null;
+  /** The resolution SLA was already overdue when the task was generated (system-caused).
+   * null = not a generated task, or not recorded (generated before this was tracked). */
+  arrived_overdue?: boolean | null;
+  /** The acknowledgement SLA was already overdue when the task was generated. */
+  ack_arrived_overdue?: boolean | null;
+}
 export interface TaskComment { id: number; author: UserRef; body: string; created_at: string; }
 export interface TaskAttachment { id: number; original_filename: string; size_bytes: number; sha256: string; uploaded_by: UserRef; created_at: string; }
 export interface AssigneeOption { id: number; full_name: string; department: DepartmentRef; }
@@ -211,7 +228,18 @@ export interface CompanyCalendar {
 export type CompletionResult = "ON_TIME" | "LATE" | "NO_DEADLINE";
 export interface DailyActivity {
   task_id: number; reference: string; title: string; responsibility: ResponsibilityRef | null;
-  occurrence_date: string | null; scheduled_start: string | null; deadline: string | null;
+  occurrence_date: string | null;
+  /** Kept for older clients: the SLA start, or the schedule time while not started. Prefer
+   * scheduled_at (the occurrence time) and sla_start_at (the effective SLA start). */
+  scheduled_start: string | null; deadline: string | null;
+  /** When the occurrence was scheduled (recorded at generation). */
+  scheduled_at?: string | null;
+  /** When the resolution SLA runs from (a hold moves it); null while not started. */
+  sla_start_at?: string | null;
+  /** Resolution SLA already overdue when generated (system-caused); null = not recorded. */
+  arrived_overdue?: boolean | null;
+  /** Acknowledgement SLA already overdue when generated; null = not recorded. */
+  ack_arrived_overdue?: boolean | null;
   status: TaskStatus; sla_state: SlaState | null; sla_note: string | null;
   /** Seconds to the deadline when the server answered (negative = overdue). */
   remaining_seconds: number | null; completed_at: string | null;
@@ -318,3 +346,145 @@ export interface OverdueCaseFilters {
 }
 export interface OverdueReasonInput { version: number; reason_category: OverdueCause; explanation: string; }
 export interface OverdueReviewInput { version: number; cause: OverdueCause; remark: string; }
+
+// --- Phase 7.4: KRA performance (exact backend contract: apps/performance/api/kra_report_serializers.py) ---
+/** What an employee sees of one of their KRA months (no raw status is ever sent). */
+export type KraEmployeeState = "PROVISIONAL" | "PENDING_REVIEW" | "FINALIZED";
+/** Decimals travel as strings with 6 places; the UI shows 2 (section 13). */
+export interface KraMyMonthRow {
+  id: number; year: number; month: number; state: KraEmployeeState;
+  /** Only for PROVISIONAL and FINALIZED months; null otherwise. */
+  final_total: string | null; max_points_applicable: string | null; band: string | null;
+}
+export interface KraMyHistory {
+  employee: { id: number; full_name: string; date_of_joining: string | null };
+  current: { year: number; month: number };
+  months: KraMyMonthRow[];
+}
+export interface KraMyComponent {
+  label: string; applicable: boolean; na_label: string | null; achievement_pct: string | null;
+  on_time_count: number; late_count: number; overdue_count: number;
+}
+export interface KraMyKpi {
+  name: string; weight: string; not_applicable: boolean; na_label: string | null;
+  achievement_pct: string | null; auto_points: string | null; final_points: string | null;
+  components: KraMyComponent[];
+}
+export interface KraMyDeduction { rule: string; kpi: string; component: string; points: string; }
+/** PENDING_REVIEW months carry only id / year / month / state. */
+export interface KraMyMonth {
+  id: number; year: number; month: number; state: KraEmployeeState;
+  auto_total?: string; final_total?: string; max_points_applicable?: string; band?: string;
+  kpis?: KraMyKpi[]; deductions?: KraMyDeduction[];
+}
+export type KraAnnualExclusion = "NO_RECORD" | "NOT_FINALIZED" | "LEGACY_SCALE" | "NOTHING_APPLICABLE";
+export interface KraMyAnnual {
+  year: number; applicable_months: number; annual_total: string | null; annual_average: string | null;
+  maximum_total: string;
+  months: { id: number; month: number; final_total: string; max_points_applicable: string; band: string }[];
+  excluded: { month: number; reason: KraAnnualExclusion }[];
+}
+/** The existing legacy (0-100) report row (apps/performance/api/serializers.py), fields used here. */
+export interface LegacyPerformanceRow {
+  id: number; employee: { id: number; employee_id: string; full_name: string };
+  year: number; month: number; status: string; overall_score: string | null; performance_band: string;
+}
+export interface KraListRow {
+  id: number;
+  employee: { id: number; employee_code: string | null; full_name: string };
+  /** The department recorded when the month was calculated. */
+  department: { id: number; code: string; name: string } | null;
+  year: number; month: number; status: string; provisional: boolean; reopen_count: number;
+  max_points_applicable: string | null; auto_total: string | null; adjustment_total: string | null;
+  deduction_total: string | null; final_total: string | null; band: string; band_ceiling: string;
+  finalized_at: string | null;
+}
+export interface KraListFilters {
+  year?: number; month?: number; employee?: number; department?: number; status?: string;
+  band?: string; provisional?: "true" | "false"; page?: number; page_size?: number;
+}
+/** The HR / Admin month detail (apps/performance/api/review_serializers.py KraRevMonthSerializer). */
+export interface KraReviewMonth {
+  id: number; employee: number; year: number; month: number; status: string; version: number;
+  plan_version: number | null; cutoff_at: string | null; provisional: boolean;
+  max_points_applicable: string | null; auto_total: string | null; adjustment_total: string | null;
+  deduction_total: string | null; final_total: string | null; band: string; band_ceiling: string;
+  reopen_count: number; reviewed_at: string | null; finalized_at: string | null;
+  kpis: {
+    kpi_id: number; code: string; name: string; weight: string; not_applicable: boolean; na_reason: string;
+    auto_points: string | null; adjustment_points: string; deduction_points: string; final_points: string | null;
+  }[];
+  deduction_applications: {
+    id: number; rule_code: string; rule_name: string; kind: string; scope: string; kpi_id: number | null;
+    component_id: number | null; percent: string | null; ceiling_band: string; evidence: string; reason: string;
+    applied_at: string; reverses: number | null; reversed_by: number | null; active: boolean;
+  }[];
+  deduction_lines: {
+    scope: string; rule_code: string; rule_name: string; kpi: string; component: string;
+    rate_pct: string | null; effective: boolean; points: string; ceiling_band?: string;
+  }[];
+  blockers: { kind: string; component: string; message: string }[];
+}
+
+/** Phase 7.5A KRA configuration (apps/performance/api/config_serializers.py). Choice values are
+ * plain strings validated by the backend; decimals travel as strings and are never computed on. */
+export type KpiCfgStatus = "DRAFT" | "ACTIVE" | "RETIRED";
+export type KpiCfgModel = "LEGACY_WEIGHTED" | "KRA_POINTS";
+export interface KpiCfgKpi { id: number; code: string; name: string; description: string; is_active: boolean; }
+export interface KpiCfgVersionedRef { id: number; code: string; version: number; name: string; status: KpiCfgStatus; }
+export interface KpiCfgPlanRef {
+  id: number; configuration: string; version: number; name: string; status: KpiCfgStatus; calculation_model: KpiCfgModel;
+}
+export interface KpiCfgComponent {
+  id: number; plan_line: number; position: number; source_type: string;
+  responsibility: { id: number; code: string; name: string } | null; label: string;
+  contribution_share: string; task_scope: string; manual_match: string; verification_policy: string;
+}
+export interface KpiCfgLine {
+  id: number; plan_version: number; kpi: { id: number; code: string; name: string }; name: string;
+  display_name: string; weight: string; scoring_rule: KpiCfgVersionedRef | null; position: number;
+  components: KpiCfgComponent[];
+}
+export interface KpiCfgDeductionRule {
+  id: number; plan_version: number; code: string; name: string; kind: string; scope: string;
+  min_pct: string | null; max_pct: string | null;
+  ceiling_band: { id: number; name: string; min_points: string } | null;
+  stacking: string; cap_pct: string | null; uncapped: boolean; priority: number | null; description: string;
+}
+export interface KpiCfgPlan {
+  id: number; configuration: string; version: number; name: string; calculation_model: KpiCfgModel;
+  status: KpiCfgStatus; effective_from: string; effective_to: string | null; band_scheme: KpiCfgVersionedRef | null;
+  credit_on_time: string | null; credit_late: string | null; credit_overdue: string | null;
+  deduction_stacking_method: string; created_at: string; activated_at: string | null;
+  retired_at: string | null; retire_reason: string;
+}
+export interface KpiCfgPlanDetail extends KpiCfgPlan { lines: KpiCfgLine[]; deduction_rules: KpiCfgDeductionRule[]; }
+export interface KpiCfgReadiness {
+  plan_id: number; status: KpiCfgStatus; calculation_model: KpiCfgModel; ready: boolean;
+  problems: string[]; checked_on: string;
+}
+export interface KpiCfgStep { min_achievement_pct: string; score_pct: string; }
+export interface KpiCfgScoringRule {
+  id: number; code: string; version: number; name: string; status: KpiCfgStatus; effective_from: string;
+  effective_to: string | null; below_min_score_pct: string | null; steps: KpiCfgStep[];
+  activated_at: string | null; retired_at: string | null; retire_reason: string;
+}
+export interface KpiCfgBand { id: number; name: string; min_points: string; position: number; }
+export interface KpiCfgBandScheme {
+  id: number; code: string; version: number; name: string; status: KpiCfgStatus; effective_from: string;
+  effective_to: string | null; bands: KpiCfgBand[]; activated_at: string | null; retired_at: string | null;
+  retire_reason: string;
+}
+export interface KpiCfgPlanDefault {
+  id: number; department: { id: number; code: string; name: string }; role: string; configuration: string;
+  effective_from: string; effective_to: string | null; created_at: string; ended_at: string | null;
+}
+export interface KpiCfgOverride {
+  id: number; employee: { id: number; full_name: string }; plan_version: KpiCfgPlanRef;
+  effective_from: string; effective_to: string | null; reason: string; created_at: string;
+}
+export interface KpiCfgResolution {
+  employee: { id: number; full_name: string }; date: string; state: "RESOLVED" | "NO_PLAN" | "AMBIGUOUS_ROLE";
+  source: "OVERRIDE" | "DEFAULT" | null; reason: string; roles: string[]; plan_version: KpiCfgPlanRef | null;
+  override_id: number | null; default_id: number | null; matching_default_ids: number[];
+}

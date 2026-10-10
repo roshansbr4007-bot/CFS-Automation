@@ -84,7 +84,7 @@ def _daily_activities(request, employees, pk):
     sla_state = _choice_param(request, "sla_state", monitoring.SLA_STATE_FILTERS)
     employee = get_object_or_404(employees, pk=pk)
     tasks = monitoring.daily_activity_tasks([employee], day)
-    rows = [monitoring.activity_row(t, now) for t in tasks]
+    rows = monitoring.activity_rows(tasks, now)
     body = {
         "date": day,
         "server_time": now,

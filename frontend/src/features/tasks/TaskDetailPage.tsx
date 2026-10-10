@@ -12,6 +12,7 @@ import { ApiError } from "../../api/apiClient";
 import { tasksApi } from "../../api/endpoints";
 import type { TaskAction, TaskDetail } from "../../api/types";
 import { DateTimeText, formatBusinessDate, formatIST } from "../../components/DateTimeText";
+import { ArrivedOverdueChip } from "./DailyActivities";
 import { acknowledgmentLabel, TASK_PRIORITY_LABEL, STATUS_LABEL, VERIFICATION_LABEL } from "./labels";
 import { SlaBadge } from "./SlaBadge";
 import { SlaPanel } from "./SlaPanel";
@@ -159,8 +160,16 @@ export function TaskDetailPage() {
           <SlaBadge clock={task.sla.resolution} note={task.sla.resolution_note} />
           {task.verification_status !== "NOT_REQUIRED" && <Chip size="small" variant="outlined" label={VERIFICATION_LABEL[task.verification_status]} />}
           {task.rework_count > 0 && <Chip size="small" variant="outlined" label={`Rework ${task.rework_count}`} />}
+          {task.arrived_overdue === true && <ArrivedOverdueChip />}
         </Stack>
       </Box>
+
+      {(task.arrived_overdue === true || task.ack_arrived_overdue === true) && (
+        <Alert severity="info" role="status">
+          {task.arrived_overdue === true && <>Arrived overdue — generated after its SLA deadline had already passed (system-caused). </>}
+          {task.ack_arrived_overdue === true && <>The acknowledgement SLA was already overdue when this task was generated.</>}
+        </Alert>
+      )}
 
       {notice && <Alert severity="success" onClose={() => setNotice(null)}>{notice}</Alert>}
       {act.error && <Alert severity="warning" role="alert">{errorMessage(act.error)}</Alert>}
@@ -192,6 +201,7 @@ export function TaskDetailPage() {
                   <Row label="Responsibility">{task.responsibility?.name ?? "—"}</Row>
                   <Row label="Schedule">{task.schedule?.title ?? "—"}</Row>
                   <Row label="Occurrence date">{task.occurrence_date ? formatBusinessDate(task.occurrence_date) : "—"}</Row>
+                  <Row label="Scheduled time"><DateTimeText value={task.scheduled_at} /></Row>
                   <Row label="Generated at"><DateTimeText value={task.generated_at} /></Row>
                 </>
               )}

@@ -7,9 +7,9 @@ of runs, retries or concurrent workers produce at most one occurrence and one ta
 
 Approved recovery rules:
 - Daily: if the run time has passed today and today's occurrence does not exist yet, it is
-  generated now (a late run still creates it once; the existing SLA engine starts the clock at
-  the original trigger time). Fully missed earlier working days are recorded as MISSED, not
-  generated (bounded look-back).
+  generated now (a late run still creates it once; the SLA engine starts its clocks at the
+  scheduled time, so a late run never gives a fresh window). Fully missed earlier working days are
+  recorded as MISSED, not generated (bounded look-back).
 - Monthly: a missed occurrence is still generated when the scheduler resumes, for its resolved
   business date (the 20th, moved to the next working day when needed).
 - Weekly (Phase B): each selected weekday's date (moved by the non-working-day policy) is
@@ -22,6 +22,11 @@ Approved recovery rules:
   If a valid owner is set later the SAME day (same-day correction), today's SKIPPED occurrence
   is recovered on its existing ledger row; earlier days and other skip reasons are not.
 Manager login plays no part in any of this.
+
+Arrival facts (approved S5-S7): the recurring.task_generated audit entry of every generated task
+also records its scheduled time, when it arrived, whether its resolution and acknowledgment clocks
+were already overdue on arrival, and the task type's own trigger. Written once, in the same
+transaction as the task; the audit log is append-only, so they never change afterwards.
 """
 
 import logging
@@ -36,6 +41,7 @@ from apps.audit.services import record
 from apps.calendars.services import is_working_day, resolve_scheduled_date
 from apps.core.timeutils import ist_datetime, to_ist
 from apps.notifications.services import notify_schedule_warning
+from apps.sla import services as sla
 from apps.tasks.services import create_scheduled_task
 
 from .models import Frequency, OccurrenceStatus, RecurringSchedule, ScheduleOccurrence
@@ -221,7 +227,8 @@ def _generate(schedule, day: date, now: datetime, scheduler) -> str:
             occurrence,
             scheduler,
             new={"status": "GENERATED", "task_id": task.pk, "assigned_to_id": owner.pk},
-            extra={"recovered": recovered, "delay_seconds": delay_seconds},
+            extra={"recovered": recovered, "delay_seconds": delay_seconds,
+                   **sla.arrival_facts(task)},
         )
         if recovered:
             _audit(
@@ -237,8 +244,8 @@ def _generate(schedule, day: date, now: datetime, scheduler) -> str:
 def _recover_skipped(occurrence, now: datetime, scheduler) -> bool:
     """Today's occurrence SKIPPED because nobody owned it: if an owner now resolves (a same-day
     correction), generate it on the SAME ledger row (no duplicate, history kept in the audit).
-    The task is created exactly as at 10:00, so the task type's trigger still starts its SLA at
-    the scheduled time; recovering late does not move the start or the deadline."""
+    The task's clocks start at the scheduled time (S1), so recovering late does not move the
+    start or the deadline."""
     day = occurrence.occurrence_date
     if day != to_ist(now).date():
         return False  # only the current business date is ever recovered
@@ -271,7 +278,7 @@ def _recover_skipped(occurrence, now: datetime, scheduler) -> bool:
             row,
             scheduler,
             new={"status": "GENERATED", "task_id": task.pk, "assigned_to_id": owner.pk},
-            extra={"recovered": True, "delay_seconds": delay_seconds},
+            extra={"recovered": True, "delay_seconds": delay_seconds, **sla.arrival_facts(task)},
         )
         _audit(
             "recurring.occurrence_recovered",

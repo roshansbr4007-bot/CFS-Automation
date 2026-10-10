@@ -1,7 +1,10 @@
-import { Chip, Paper, Stack, Typography } from "@mui/material";
+import { Chip, Stack, Typography } from "@mui/material";
 
 import { useAuth } from "../app/AuthProvider";
+import { MyPerformance } from "../features/performance/MyPerformance";
 
+/** Home: a welcome, the signed-in roles and (Phase 7.4) my own KRA performance, for every role
+ * whose login is linked to an employee record. */
 export function HomePage() {
   const { user } = useAuth();
   if (!user) return null;
@@ -15,11 +18,7 @@ export function HomePage() {
           <Chip key={role} label={role} variant="outlined" />
         ))}
       </Stack>
-      <Paper sx={{ p: 3, maxWidth: 640 }}>
-        <Typography>
-          This release covers sign-in, user management, departments, employees, daily login history and the audit log. Task and SLA modules will be added in the next phases.
-        </Typography>
-      </Paper>
+      <MyPerformance />
     </Stack>
   );
 }

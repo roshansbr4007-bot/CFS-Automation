@@ -4,7 +4,9 @@ Recipients (locked decision, resolved at the moment the threshold fires):
 - 50%  Warning : assigned employee, in-app.
 - 75%  Critical: assigned employee, in-app + email.
 - 100% Overdue : assigned employee + every ACTIVE HR user + the designated Boss recipient,
-                 in-app + email. Applies to the ACK and the RESOLUTION clock alike.
+                 in-app + email. Applies to the ACK and the RESOLUTION clock alike, except the
+                 one case the SLA checker passes escalate=False for (approved C1: a scheduled
+                 task's ACK clock already overdue when it was created): the employee only.
 
 "Boss" is NOT a role and is never "every Admin". It is resolved by the function named in
 settings.SLA_BOSS_RESOLVER (default: the assignee's reporting manager, the Phase 2 reporting
@@ -60,8 +62,9 @@ def boss_recipient(clock) -> tuple[User | None, str | None]:
     return import_string(settings.SLA_BOSS_RESOLVER)(clock)
 
 
-def recipients_for(clock, level: str) -> tuple[list[User], str | None]:
-    """(recipients, reason the Boss could not be resolved or None)."""
+def recipients_for(clock, level: str, *, escalate: bool = True) -> tuple[list[User], str | None]:
+    """(recipients, reason the Boss could not be resolved or None). escalate=False keeps the
+    employee and leaves HR and the Boss out (the Boss is then not even looked up)."""
     people: dict[int, User] = {}
     employee_user = clock.task.assigned_to.user
     if employee_user is not None and employee_user.is_active:
@@ -69,7 +72,7 @@ def recipients_for(clock, level: str) -> tuple[list[User], str | None]:
     else:
         logger.info("SLA %s on task %s: assignee has no active login", level, clock.task_id)
     boss_gap = None
-    if level == "OVERDUE":
+    if level == "OVERDUE" and escalate:
         for user in User.objects.filter(is_active=True, groups__name=roles.HR).distinct():
             people[user.pk] = user
         boss, boss_gap = boss_recipient(clock)
@@ -95,12 +98,12 @@ def _message(clock, level: str) -> tuple[str, str]:
     return title, body
 
 
-def notify_threshold(clock, level: str) -> str | None:
+def notify_threshold(clock, level: str, *, escalate: bool = True) -> str | None:
     """Create the notifications for one threshold of one clock. Safe to call repeatedly.
 
     Returns why no Boss recipient could be resolved (Overdue only), else None."""
     title, body = _message(clock, level)
-    recipients, boss_gap = recipients_for(clock, level)
+    recipients, boss_gap = recipients_for(clock, level, escalate=escalate)
     email = EmailStatus.PENDING if level in EMAIL_LEVELS else EmailStatus.NOT_REQUIRED
     rows = [
         Notification(

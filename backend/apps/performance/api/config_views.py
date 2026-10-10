@@ -252,6 +252,30 @@ class PlanRetireView(_ApproveView):
         return _plan_response(version)
 
 
+@extend_schema(tags=[TAG])
+class PlanReadinessView(_ConfigView):
+    """Phase 7.5A: read-only. Reading changes, locks and audits nothing."""
+
+    permission_classes = [KpiConfigPermission]  # reads / writes: see the class attributes
+    serializer_class = s.KpiCfgPlanReadinessSerializer
+
+    @extend_schema(responses={200: s.KpiCfgPlanReadinessSerializer, 401: ErrorSerializer,
+                              403: ErrorSerializer, 404: ErrorSerializer},
+                   summary="Would this plan version be activated right now? (read-only check)")
+    def get(self, request, pk):
+        version = get_object_or_404(KPIWeightVersion, pk=pk)
+        checked_on = svc.today()  # the same IST date plan_activation_problems compares with
+        problems = svc.plan_readiness(version)
+        return Response(s.KpiCfgPlanReadinessSerializer({
+            "plan_id": version.pk,
+            "status": version.status,
+            "calculation_model": version.calculation_model,
+            "ready": not problems,
+            "problems": problems,
+            "checked_on": checked_on,
+        }).data)
+
+
 # --- plan lines and components ---------------------------------------------------------------
 
 

@@ -14,6 +14,13 @@ Approved rules implemented here:
   (MET/MISSED). Verification rejection starts no new clock.
 - evaluate_clocks() is what `sla_tick` (and later Celery beat) calls. Each threshold is
   recorded once under a row lock; notifications are deduplicated by a unique key.
+- Scheduled tasks (approved S1-S3): every clock of a task generated from a responsibility
+  schedule starts at its SCHEDULED time (occurrence date + the schedule's run time, IST), labelled
+  FIXED_TIME, whenever the task is generated and whoever signs in when. Only a task type that waits
+  on the DEPENDENCY trigger keeps the dependency engine's start. Manual tasks are unchanged.
+- An ACK clock of a scheduled task that was already overdue when it was created escalates its
+  OVERDUE level to the employee only (approved C1/C2): HR and the reporting manager are not
+  notified, and task.sla_escalation_suppressed records it once.
 """
 
 import logging
@@ -108,8 +115,8 @@ def priority_plan(*, source, priority, template=None):
 def responsibility_plan(task):
     """(rule, snapshot, note) when a SCHEDULED task's responsibility has a deadline (SLA) set by
     HR / Admin, else None. It takes precedence over the task type's SLA and the priority SLA for
-    that scheduled task only; manual tasks never use it. The clock starts at generation
-    (assignment) time, like the priority path."""
+    that scheduled task only; manual tasks never use it. The clock starts at the task's
+    scheduled time (scheduled_start), like every clock of a generated task."""
     if task.source != "SCHEDULED" or task.responsibility_id is None:
         return None
     code = task.responsibility.deadline_rule_code
@@ -189,31 +196,62 @@ def _new_clock(task, kind, rule, snap, trigger, start_at, assignment=None) -> Ta
     )
 
 
-def start_ack_clock(task, assignment, start_at: datetime) -> TaskSla | None:
+def start_ack_clock(
+    task, assignment, start_at: datetime, trigger: str = Trigger.ASSIGNMENT
+) -> TaskSla | None:
     rule = active_rule(ACK_RULE_CODE)
     if rule is None:
         return None
     snap, _ = _rule_snapshot(rule)
-    return _new_clock(task, ClockKind.ACK, rule, snap, Trigger.ASSIGNMENT, start_at, assignment)
+    return _new_clock(task, ClockKind.ACK, rule, snap, trigger, start_at, assignment)
+
+
+def scheduled_time(task) -> datetime | None:
+    """A generated (SCHEDULED) task's scheduled occurrence time: its occurrence date at the
+    schedule's run time, IST. None for any other task."""
+    if task.source != "SCHEDULED" or task.schedule_id is None or task.occurrence_date is None:
+        return None
+    return ist_datetime(task.occurrence_date, task.schedule.run_time)
+
+
+def scheduled_start(task) -> datetime | None:
+    """Where a generated task's clocks start: its scheduled time, never later than its
+    assignment (every generation path only creates an occurrence that is already due, so this
+    only guards against a clock starting in the future). None for any other task."""
+    scheduled = scheduled_time(task)
+    if scheduled is None or task.assigned_at is None:
+        return scheduled
+    return min(scheduled, task.assigned_at)
 
 
 def on_task_created(task, assignment, now: datetime) -> None:
+    # Approved S1-S3: a generated task's clocks start at its scheduled time (FIXED_TIME), not at
+    # generation or login; manual tasks keep their assignment / trigger start exactly as before.
+    scheduled = scheduled_start(task)
+    start, label = (task.assigned_at, Trigger.ASSIGNMENT) if scheduled is None else (
+        scheduled, Trigger.FIXED_TIME
+    )
     if task.acknowledgment_required:
-        start_ack_clock(task, assignment, task.assigned_at)
+        start_ack_clock(task, assignment, start, label)
     by_responsibility = responsibility_plan(task)
     if by_responsibility is not None and by_responsibility[1] is not None:
         rule, snap, _ = by_responsibility
-        _new_clock(task, ClockKind.RESOLUTION, rule, snap, Trigger.ASSIGNMENT, task.assigned_at)
+        _new_clock(task, ClockKind.RESOLUTION, rule, snap, label, start)
         return
     by_priority = priority_plan(source=task.source, priority=task.priority, template=task.template)
     if by_priority is not None:
         rule, snap, _ = by_priority
         if snap is not None:
-            _new_clock(task, ClockKind.RESOLUTION, rule, snap, Trigger.ASSIGNMENT, task.assigned_at)
+            _new_clock(task, ClockKind.RESOLUTION, rule, snap, label, start)
         return
     rule, snap, _ = resolution_plan(task.template)
     if rule is None or snap is None:
         return  # No SLA configured / rule inactive: the API explains why
+    if scheduled is not None and task.template.trigger != Trigger.DEPENDENCY:
+        # Assignment, Login, Fixed-time and Event task types alike (S2): the scheduled time. A
+        # later login can no longer start it (start_login_clocks only takes unstarted clocks).
+        _new_clock(task, ClockKind.RESOLUTION, rule, snap, Trigger.FIXED_TIME, scheduled)
+        return
     start_at, _ = trigger_start(
         task.template,
         assignee_id=task.assigned_to_id,
@@ -223,6 +261,44 @@ def on_task_created(task, assignment, now: datetime) -> None:
         now=now,
     )
     _new_clock(task, ClockKind.RESOLUTION, rule, snap, task.template.trigger, start_at)
+
+
+def overdue_on_arrival(clock: TaskSla | None) -> bool | None:
+    """Was this clock already past its overdue threshold when it was created? None when there is
+    no clock or it had not started (e.g. still waiting on its dependency)."""
+    if clock is None or clock.start_at is None or clock.due_at is None:
+        return None
+    pct = engine.elapsed_pct(clock.start_at, clock.due_at, clock.created_at)
+    return engine.state_for(pct, clock.rule_snapshot) == SlaState.OVERDUE
+
+
+def arrival_facts(task) -> dict:
+    """The facts recorded once, when a scheduled task is generated (approved S5-S7), in its
+    recurring.task_generated audit entry. Computed from the clocks just created, so a later hold,
+    resume, reassignment or completion can never change them."""
+    clocks = {c.kind: c for c in TaskSla.objects.filter(task=task, is_current=True)}
+    scheduled = scheduled_time(task)
+    return {
+        "scheduled_at": scheduled.isoformat() if scheduled else None,
+        "arrived_at": task.assigned_at.isoformat() if task.assigned_at else None,
+        "resolution_overdue_on_arrival": overdue_on_arrival(clocks.get(ClockKind.RESOLUTION)),
+        "ack_overdue_on_arrival": overdue_on_arrival(clocks.get(ClockKind.ACK)),
+        "template_trigger": task.template.trigger if task.template_id else None,
+    }
+
+
+def ack_escalation_suppressed(clock: TaskSla, level: str) -> bool:
+    """Approved C1: the OVERDUE level of a scheduled task's own ACK clock (created with it, so
+    labelled FIXED_TIME; a reassignment's or a manual task's ACK clock never is) that was ALREADY
+    overdue when the clock was created. Only HR and the reporting manager are left out; the
+    employee is still notified. An ACK clock that becomes overdue after arrival escalates."""
+    return (
+        level == "OVERDUE"
+        and clock.kind == ClockKind.ACK
+        and clock.trigger == Trigger.FIXED_TIME
+        and clock.task.source == "SCHEDULED"
+        and overdue_on_arrival(clock) is True
+    )
 
 
 def _current(task, kind) -> TaskSla | None:
@@ -608,7 +684,10 @@ def evaluate_clock(pk: int, now: datetime) -> ClockResult:
         clock.state = engine.state_for(pct, snap)
         clock.save(update_fields=fields)
         for level in reached:
-            boss_gap = notifications.notify_threshold(clock, level)
+            suppressed = ack_escalation_suppressed(clock, level)
+            # A suppressed escalation never looks up the reporting manager, so it can never
+            # report a missing recipient either.
+            boss_gap = notifications.notify_threshold(clock, level, escalate=not suppressed)
             if boss_gap:
                 gaps += 1
                 record(
@@ -627,6 +706,26 @@ def evaluate_clock(pk: int, now: datetime) -> ClockResult:
                 use_request_user=False,
                 extra={"department_id": clock.task.department_id},
             )
+            if suppressed:
+                # Exactly once: this branch runs only when overdue_at was just set, under the
+                # row lock taken above (approved C2). Ids and times only, no personal data.
+                record(
+                    action="task.sla_escalation_suppressed",
+                    entity_type="task",
+                    entity_id=clock.task_id,
+                    new={
+                        "clock": clock.kind,
+                        "clock_id": clock.pk,
+                        "level": level,
+                        "reason": "ACK_OVERDUE_ON_ARRIVAL",
+                        # BOSS = settings.SLA_BOSS_RESOLVER (default: the reporting manager).
+                        "suppressed_recipients": ["HR", "BOSS"],
+                        "clock_created_at": clock.created_at.isoformat(),
+                        "overdue_threshold_at": clock.overdue_at.isoformat(),
+                    },
+                    use_request_user=False,
+                    extra={"department_id": clock.task.department_id},
+                )
         if "OVERDUE" in reached and clock.kind == ClockKind.RESOLUTION:
             _announce_overdue(clock, "TICK")  # Phase 9: exactly once per clock (overdue_at)
     return ClockResult(reached, gaps)

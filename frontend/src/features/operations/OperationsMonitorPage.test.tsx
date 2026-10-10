@@ -64,7 +64,11 @@ function teamHandlers(seen: URL[]) {
     }),
     http.get("*/api/v1/operations/team/employees/10/daily-activities/", ({ request }) => {
       seen.push(new URL(request.url));
-      return HttpResponse.json({ ...detail, counts: counts(1, 1, 0, 0), activities: [makeActivity({ status: "COMPLETED", completed_at: "2026-10-05T06:05:00Z", completion_result: "ON_TIME", remaining_seconds: null })] });
+      return HttpResponse.json({ ...detail, counts: counts(1, 1, 0, 0), activities: [makeActivity({
+        status: "COMPLETED", completed_at: "2026-10-05T06:05:00Z", completion_result: "ON_TIME", remaining_seconds: null,
+        // Scheduling fix (S5/S6): arrived overdue, then held, so the SLA start moved to 10:30.
+        arrived_overdue: true, sla_start_at: "2026-10-05T10:30:00+05:30",
+      })] });
     }),
     http.get("*/api/v1/operations/team/employees/10/assigned-tasks/", ({ request }) => {
       seen.push(new URL(request.url));
@@ -96,6 +100,8 @@ describe("Operations monitor (Operations Manager: own department)", () => {
     await userEvent.click(within(table).getByRole("button", { name: "View" }));
     const daily = await screen.findByRole("table", { name: "Daily activities" });
     expect(await within(daily).findByText("Completed on time")).toBeInTheDocument();
+    expect(within(daily).getByText("Arrived overdue")).toBeInTheDocument();
+    expect(within(daily).getByText(/^SLA start/)).toHaveTextContent(/10:30/);
     await waitFor(() => expect(seen.some((u) => u.pathname === "/api/v1/operations/team/employees/10/assigned-tasks/")).toBe(true));
     expect(seen.every((u) => u.pathname.startsWith("/api/v1/operations/team/"))).toBe(true);
   });
@@ -128,6 +134,9 @@ describe("Operations monitor (Admin = Boss)", () => {
     await userEvent.click(within(table).getByRole("button", { name: "View" }));
     const daily = await screen.findByRole("table", { name: "Daily activities" });
     expect(await within(daily).findByText("Completed on time")).toBeInTheDocument();
+    expect(within(daily).getByRole("columnheader", { name: "Scheduled" })).toBeInTheDocument();
+    expect(within(daily).queryByRole("columnheader", { name: "Scheduled start" })).not.toBeInTheDocument();
+    expect(within(daily).queryByText("Arrived overdue")).not.toBeInTheDocument(); // on time
     const tasks = screen.getByRole("table", { name: "Assigned tasks" });
     expect(await within(tasks).findByText("Map RM codes")).toBeInTheDocument();
     expect(within(tasks).getByText("Ops Manager")).toBeInTheDocument(); // assigned by

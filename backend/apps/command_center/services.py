@@ -141,8 +141,9 @@ def _rows_for(employees, filters: Filters, now: datetime) -> tuple[dict, dict]:
     each tagged with its source. Scheduled and manual work are never mixed."""
     daily, assigned = {}, {}
     if filters.source in (None, SCHEDULED):
-        for task in monitoring.daily_activity_tasks(employees, filters.day):
-            row = {**monitoring.activity_row(task, now), "source": SCHEDULED}
+        tasks = list(monitoring.daily_activity_tasks(employees, filters.day))
+        for task, row in zip(tasks, monitoring.activity_rows(tasks, now), strict=True):
+            row = {**row, "source": SCHEDULED}
             if _keep(row, filters):
                 daily.setdefault(task.assigned_to_id, []).append(row)
     if filters.source in (None, MANUAL):

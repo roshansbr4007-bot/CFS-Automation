@@ -140,7 +140,9 @@ def test_a_responsibility_deadline_still_wins_over_the_dependency(duty, admin_us
         generator.generate_due_occurrences()
     recon = _task(recon_duty, date(2026, 10, 5))
     clock = _clock(recon)
-    assert (clock.trigger, clock.rule_snapshot["code"]) == ("ASSIGNMENT", f"RESP_{recon_duty.pk}")
+    # Scheduling fix (S1/S3): the responsibility deadline runs from the scheduled time and is
+    # labelled FIXED_TIME (was ASSIGNMENT; generated on time, so the times are unchanged).
+    assert (clock.trigger, clock.rule_snapshot["code"]) == ("FIXED_TIME", f"RESP_{recon_duty.pk}")
     assert (clock.start_at, clock.due_at) == (ist(2026, 10, 5, 10, 0), ist(2026, 10, 5, 12, 0))
     assert not TaskDependency.objects.exists()
     before = list(TaskSla.objects.filter(task=recon).values())

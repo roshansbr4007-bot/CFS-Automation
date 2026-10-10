@@ -53,7 +53,7 @@ function ClockBlock({ title, clock }: { title: string; clock: SlaClock }) {
         <Typography variant="body2">{clock.waiting_for}</Typography>
       ) : (
         <>
-          <Typography variant="body2">Starts: <DateTimeText value={clock.start_at} /></Typography>
+          <Typography variant="body2">SLA start: <DateTimeText value={clock.start_at} /></Typography>
           <Typography variant="body2">Due: <strong><DateTimeText value={clock.due_at} /></strong></Typography>
           {clock.elapsed_pct !== null && (
             <Typography variant="body2">Elapsed: {clock.elapsed_pct}%{clock.stopped_at ? " (stopped)" : ""}</Typography>

@@ -165,5 +165,53 @@ describe("Task detail page", () => {
     renderApp("/tasks/1");
     expect(await screen.findByText("MANUAL")).toBeInTheDocument();
     expect(screen.queryByText("Occurrence date")).not.toBeInTheDocument();
+    expect(screen.queryByText("Scheduled time")).not.toBeInTheDocument();
+    expect(screen.queryByText("Arrived overdue")).not.toBeInTheDocument();
+  });
+
+  const scheduled = {
+    source: "SCHEDULED" as const, title: "Feed Upload — 05 Oct 2026",
+    responsibility: { id: 1, code: "FEED_UPLOAD", name: "Feed Upload" },
+    schedule: { id: 4, title: "Feed Upload", frequency: "DAILY" },
+    occurrence_date: "2026-10-05", generated_at: "2026-10-05T07:00:00Z", // 12:30 IST, late
+    scheduled_at: "2026-10-05T10:00:00+05:30",
+  };
+
+  function rowValue(label: string) {
+    return (screen.getByText(label).parentElement as HTMLElement).textContent ?? "";
+  }
+
+  it("shows the scheduled time and a system-caused overdue arrival (read-only)", async () => {
+    serve(makeTask({
+      ...scheduled, arrived_overdue: true, ack_arrived_overdue: true,
+      sla: { resolution: makeClock({ start_at: "2026-10-05T04:30:00Z", state: "OVERDUE" }), resolution_note: null, acknowledgment: null },
+    }));
+    renderApp("/tasks/1");
+    expect(await screen.findByText("Arrived overdue")).toBeInTheDocument();
+    expect(rowValue("Scheduled time")).toMatch(/10:00/);
+    expect(rowValue("Generated at")).toMatch(/12:30/);
+    const note = screen.getByText(/generated after its SLA deadline had already passed \(system-caused\)/);
+    expect(note).toHaveTextContent("The acknowledgement SLA was already overdue when this task was generated.");
+    const sla = within(screen.getByRole("region", { name: "SLA" }));
+    expect(sla.getByText(/SLA start:/)).toBeInTheDocument();
+    expect(sla.queryByText(/^Starts:/)).not.toBeInTheDocument();
+    // Informational only: the actions still come from the backend's allowed_actions.
+    expect((await actions()).getByRole("button", { name: "Start" })).toBeInTheDocument();
+  });
+
+  it("notes an acknowledgement-only late arrival without the overdue badge", async () => {
+    serve(makeTask({ ...scheduled, arrived_overdue: false, ack_arrived_overdue: true }));
+    renderApp("/tasks/1");
+    expect(await screen.findByText("The acknowledgement SLA was already overdue when this task was generated.")).toBeInTheDocument();
+    expect(screen.queryByText("Arrived overdue")).not.toBeInTheDocument();
+  });
+
+  it("shows no arrival facts when they were not recorded", async () => {
+    serve(makeTask({ ...scheduled, arrived_overdue: null, ack_arrived_overdue: null }));
+    renderApp("/tasks/1");
+    expect(await screen.findByText("SCHEDULED")).toBeInTheDocument();
+    expect(rowValue("Scheduled time")).toMatch(/10:00/);
+    expect(screen.queryByText("Arrived overdue")).not.toBeInTheDocument();
+    expect(screen.queryByText(/acknowledgement SLA was already overdue/)).not.toBeInTheDocument();
   });
 });

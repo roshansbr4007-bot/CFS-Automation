@@ -6,10 +6,10 @@ import { server, signedInAs } from "../test/server";
 import { renderApp } from "../test/utils";
 
 const EXPECTED: Record<RoleName, string[]> = {
-  Employee: ["Home", "My profile", "Tasks", "My overdue cases"],
+  Employee : ["Home", "My profile", "Tasks", "My overdue cases"],
   "Operations Manager": ["Home", "My profile", "Tasks", "My overdue cases", "Overdue review queue", "Responsibilities", "Schedules", "Employees", "Operations monitor"],
-  HR: ["Home", "My profile", "Tasks", "My overdue cases", "Overdue review queue", "Responsibilities", "Schedules", "Employees", "Audit log"],
-  Admin: ["Home", "My profile", "Tasks", "My overdue cases", "Overdue review queue", "Responsibilities", "Schedules", "Employees", "Departments", "Users", "Audit log", "Company calendar", "Operations monitor", "Command center"],
+  HR: ["Home", "My profile", "Tasks", "My overdue cases", "Overdue review queue", "Responsibilities", "Schedules", "Employees", "KRA performance", "KRA configuration", "Audit log"],
+  Admin: ["Home", "My profile", "Tasks", "My overdue cases", "Overdue review queue", "Responsibilities", "Schedules", "Employees", "KRA performance", "KRA configuration", "Departments", "Users", "Audit log", "Company calendar", "Operations monitor", "Command center"],
 };
 
 describe("Navigation per role (F3)", () => {

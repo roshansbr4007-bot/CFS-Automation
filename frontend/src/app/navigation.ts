@@ -11,6 +11,8 @@ export const NAV_ITEMS: NavItem[] = [
   { label: "Responsibilities", to: "/responsibilities", anyPerms: [PERM.viewAllResponsibilities, PERM.manageTeamResponsibilities, PERM.manageAllResponsibilities] },
   { label: "Schedules", to: "/schedules", anyPerms: [PERM.viewAllResponsibilities, PERM.manageTeamResponsibilities, PERM.manageAllResponsibilities] },
   { label: "Employees", to: "/employees", anyPerms: [PERM.viewAllEmployees, PERM.viewTeamEmployees] },
+  { label: "KRA performance", to: "/performance/months", anyPerms: [PERM.managePerformance, PERM.finalizePerformance, PERM.reopenPerformance] },
+  { label: "KRA configuration", to: "/performance/config", anyPerms: [PERM.configureKpis, PERM.approveKpiConfig] },
   { label: "Departments", to: "/departments", perm: PERM.manageDepartments },
   { label: "Users", to: "/admin/users", perm: PERM.manageUsers },
   { label: "Audit log", to: "/admin/audit", perm: PERM.viewAuditLog },

@@ -9,7 +9,7 @@ import { useAuth } from "../../app/AuthProvider";
 import { ApiErrorAlert } from "../../components/ApiErrorAlert";
 import { DataTable, type Column } from "../../components/DataTable";
 import { DateTimeText, formatBusinessDate } from "../../components/DateTimeText";
-import { ResultChip } from "../tasks/DailyActivities";
+import { ResultChip, ScheduledCell } from "../tasks/DailyActivities";
 import { PRIORITY_LABEL, STATUS_LABEL } from "../tasks/labels";
 import { SLA_LABEL, SlaStateChip } from "../tasks/SlaBadge";
 
@@ -107,7 +107,7 @@ function EmployeeDetail({ employee, date, team, onClose }: { employee: Monitored
   });
   const dailyColumns: Column<DailyActivity>[] = [
     { key: "activity", header: "Activity", render: (a) => a.responsibility?.name ?? a.title },
-    { key: "start", header: "Scheduled start", render: (a) => <DateTimeText value={a.scheduled_start} /> },
+    { key: "start", header: "Scheduled", render: (a) => <ScheduledCell activity={a} /> },
     { key: "deadline", header: "Deadline", render: (a) => a.deadline ? <DateTimeText value={a.deadline} /> : "No deadline" },
     { key: "status", header: "Status", render: (a) => STATUS_LABEL[a.status] },
     { key: "sla", header: "SLA", render: (a) => <SlaStateChip state={a.sla_state} /> },
